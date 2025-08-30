@@ -29,7 +29,7 @@
 ```xml
 <dependency>
     <groupId>com.gitee.wb04307201</groupId>
-    <artifactId>CHMLock</artifactId>
+    <artifactId>CHMRLock</artifactId>
     <version>1.0.0</version>
 </dependency>
 ```
