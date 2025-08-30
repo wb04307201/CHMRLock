@@ -2,7 +2,7 @@
 
 > 一个基于Java `ConcurrentHashMap` 和 `ReentrantLock` 的锁实现。它提供了锁的获取、释放、自动清理过期锁以及监控指标统计等功能。
 
-[![](https://jitpack.io/v/com.gitee.wb04307201/CHMLock.svg)](https://jitpack.io/#com.gitee.wb04307201/CHMLock)
+[![](https://jitpack.io/v/com.gitee.wb04307201/CHMRLock.svg)](https://jitpack.io/#com.gitee.wb04307201/CHMRLock)
 
 ## 特性
 
