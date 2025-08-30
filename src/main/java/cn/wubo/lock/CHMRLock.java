@@ -87,6 +87,13 @@ public class CHMRLock {
     }
 
     /**
+     * 获取锁（指定等待时间）
+     */
+    public boolean tryLock(String key, long waitTime){
+        return tryLock(key, waitTime, TimeUnit.MILLISECONDS);
+    }
+
+    /**
      * 释放锁
      */
     public void unlock(String key) {
