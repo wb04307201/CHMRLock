@@ -193,10 +193,9 @@ public class CHMRLockTest {
     }
 
     @Test
-    public void testUnlockUnknownKeyThrows() {
-        LockNotFoundException ex = assertThrows(LockNotFoundException.class,
-                () -> lockManager.unlock("never_locked"));
-        assertTrue(ex.getMessage().contains("never_locked"));
+    public void testUnlockUnknownKeyIsNoop() {
+        // 未知 key 的 unlock 应为幂等 no-op(避免 AcquiredLock.close() 在清理后失败)
+        assertDoesNotThrow(() -> lockManager.unlock("never_locked"));
     }
 
     @Test

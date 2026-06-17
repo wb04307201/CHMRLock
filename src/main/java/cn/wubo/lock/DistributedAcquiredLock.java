@@ -21,7 +21,7 @@ package cn.wubo.lock;
 public class DistributedAcquiredLock implements AutoCloseable {
     private final DistributedLock lock;
     private final String key;
-    private boolean valid;
+    private volatile boolean valid;
 
     /**
      * 构造锁包装实例。

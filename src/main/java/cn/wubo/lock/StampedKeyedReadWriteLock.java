@@ -47,11 +47,15 @@ final class StampedKeyedReadWriteLock implements KeyedReadWriteLock {
 
     @Override
     public void unlockRead(long stamp) {
+        // 底层 StampedLock: 若 stamp 不是读锁戳记,抛 IllegalMonitorStateException
+        // (实际类型为 StampedLock.WrongThreadStampException,继承 IllegalMonitorStateException)。
         stamped.unlockRead(stamp);
     }
 
     @Override
     public void unlockWrite(long stamp) {
+        // 底层 StampedLock: 若 stamp 不是写锁戳记,抛 IllegalMonitorStateException
+        // (实际类型为 StampedLock.WrongThreadStampException,继承 IllegalMonitorStateException)。
         stamped.unlockWrite(stamp);
     }
 }

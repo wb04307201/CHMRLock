@@ -94,6 +94,7 @@ public class JsonMetricsExporter implements MetricsExporter {
             switch (c) {
                 case '"':  sb.append("\\\""); break;
                 case '\\': sb.append("\\\\"); break;
+                case '/':  sb.append("\\/"); break;
                 case '\b': sb.append("\\b"); break;
                 case '\f': sb.append("\\f"); break;
                 case '\n': sb.append("\\n"); break;
@@ -111,7 +112,12 @@ public class JsonMetricsExporter implements MetricsExporter {
         return sb.toString();
     }
 
-    /** 辅助方法,用于测试。返回序列化后的 JSON 字符串。 */
+    /**
+     * 辅助方法,用于测试。返回序列化后的 JSON 字符串。
+     * 行为等价于 {@code new JsonMetricsExporter(sb).export(global, perKey)} 然后
+     * {@code sb.toString()}。仅作测试便利,不建议在生产代码中使用(生产请直接
+     * 通过 {@link #export(MonitorMetrics, Map)} 写入 Appendable)。
+     */
     public String exportToString(MonitorMetrics global, Map<String, KeyStatistics> perKey) {
         StringBuilder sb = new StringBuilder();
         new JsonMetricsExporter(sb).export(global, perKey);

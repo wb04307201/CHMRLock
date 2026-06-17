@@ -36,7 +36,7 @@ public record CHMRLockConfig(
         if (defaultWaitTime.isNegative()) throw new IllegalArgumentException("defaultWaitTime 不能为负");
         if (defaultLeaseTime.isNegative()) throw new IllegalArgumentException("defaultLeaseTime 不能为负");
         if (idleThreshold.isNegative()) throw new IllegalArgumentException("idleThreshold 不能为负");
-        if (cleanupInterval.isNegative()) throw new IllegalArgumentException("cleanupInterval 不能为负");
+        if (cleanupInterval.isZero() || cleanupInterval.isNegative()) throw new IllegalArgumentException("cleanupInterval 必须为正");
     }
 
     /** @return 包含所有默认值的 {@link CHMRLockConfig} 实例。 */

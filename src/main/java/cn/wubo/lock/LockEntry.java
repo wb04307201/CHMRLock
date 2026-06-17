@@ -1,5 +1,6 @@
 package cn.wubo.lock;
 
+import java.time.Clock;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -34,8 +35,8 @@ class LockEntry {
         return lastAcquireTime.get();
     }
 
-    void touchLastAcquireTime() {
-        lastAcquireTime.set(System.currentTimeMillis());
+    void touchLastAcquireTime(Clock clock) {
+        lastAcquireTime.set(clock.millis());
     }
 
     Long getOwnerThreadId() {

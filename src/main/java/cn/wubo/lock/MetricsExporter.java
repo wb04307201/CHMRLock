@@ -5,12 +5,11 @@ import java.util.Map;
 /**
  * 指标导出 SPI。实现类负责把 CHMRLock 的指标序列化为目标格式( JSON / Prometheus / StatsD 等)。
  *
- * <p>调用方通过 {@link CHMRLock#exportMetrics(MetricsExporter)} 主动触发导出;
- * 若配置了 {@link StatisticsSink} 与 {@link CHMRLockConfig#getStatisticsSinkInterval()},
- * 导出将由后台线程周期性触发。</p>
+ * <p>调用方通过 {@link CHMRLock#exportMetrics(MetricsExporter)} 主动触发导出 —
+ * CHMRLock 当前不内置周期性导出线程,如有需要请在外部自行调度。
+ * 若需要持续累积的持久化存储,请使用 {@link StatisticsSink} 并自行管理调度。</p>
  *
  * @see JsonMetricsExporter
- * @see CHMRLockConfig.Builder#metricsExporter(MetricsExporter)
  * @see StatisticsSink
  * @since 1.2.0
  */

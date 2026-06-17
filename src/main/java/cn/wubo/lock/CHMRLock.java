@@ -63,7 +63,10 @@ public class CHMRLock implements AutoCloseable {
     // 清理线程池：用于定期执行清理任务
     private final ScheduledExecutorService cleanupExecutor;
 
-    // 异步获取锁的线程池：用于 CompletableFuture.supplyAsync 的执行器（守护线程）
+    // 异步获取锁的线程池：用于 CompletableFuture.supplyAsync 的执行器（守护线程）。
+    // 注:这是无界 cached 线程池 — 若大量并发 tryAcquireAsync 调用命中同一把争用锁,
+    // 线程数会快速增长(每个调用都会占一个线程直到 tryLock 返回)。生产环境若有此
+    // 风险,建议在外层做并发限流或自行注入有界 ExecutorService(暂未提供配置入口)。
     private final ExecutorService asyncExecutor;
 
     // 锁生命周期监听器列表
@@ -107,6 +110,11 @@ public class CHMRLock implements AutoCloseable {
         startCleanupThread();
     }
 
+    /**
+     * 创建守护线程工厂。{@code seq} 为每个工厂实例的独立计数器(每次调用本方法
+     * 都会返回一个新的工厂和独立的序列号空间),用于生成 {@code prefix-N} 形式的
+     * 线程名,避免不同实例的线程名冲突。
+     */
     private static ThreadFactory daemonThreadFactory(CHMRLockConfig config, String prefix) {
         AtomicInteger seq = new AtomicInteger(1);
         return r -> {
@@ -132,7 +140,7 @@ public class CHMRLock implements AutoCloseable {
             LockEntry le = entry.getValue();
             if (le.lock.isLocked()) return false;
             if (le.getLeaseEndTime() != Long.MAX_VALUE && le.getLeaseEndTime() < now) {
-                return false;  // 租约未到,保留(理论上不会出现这种情况)
+                return false;  // 保留租约未结束的 entry(防御性,避免误删)
             }
             // 收窄竞态窗口:先用 tryLock(0) 原子地"借"一下锁,若能借到说明此刻无人持有,
             // 然后立即释放借到的锁,最后再做空闲判断。
@@ -201,6 +209,9 @@ public class CHMRLock implements AutoCloseable {
      */
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         Objects.requireNonNull(key, "key must not be null");
+        Objects.requireNonNull(timeUnit, "timeUnit must not be null");
+        if (waitTime < 0) throw new IllegalArgumentException("waitTime 必须 >= 0,实际:" + waitTime);
+        if (leaseTime < 0) throw new IllegalArgumentException("leaseTime 必须 >= 0,实际:" + leaseTime);
         long startTime = config.clock().millis();
         long startNanos = System.nanoTime();
         totalLocks.incrementAndGet();
@@ -243,7 +254,7 @@ public class CHMRLock implements AutoCloseable {
             boolean acquired = lockEntry.lock.tryLock(waitTime, timeUnit);
             if (acquired) {
                 successLocks.incrementAndGet();
-                lockEntry.touchLastAcquireTime();
+                lockEntry.touchLastAcquireTime(config.clock());
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
                 // 重新获取时复位 forceUnlock 哨兵，使后续 isLocked 反映真实状态
                 lockEntry.clearForceUnlocked();
@@ -298,6 +309,10 @@ public class CHMRLock implements AutoCloseable {
                 // 后续由原持有线程调用 unlock(key) 时,C-4 修复会让 unlock 走哨兵感知路径,
                 // 跳过底层 lock.unlock() 并清除哨兵。
                 entry.markForceUnlocked();
+                // 记录 per-key 释放时间戳,使 lastReleaseEpochMs 反映租约到期时刻
+                if (config.enablePerKeyMetrics()) {
+                    entry.recordRelease(config.clock().millis());
+                }
                 // 租约已到期,通知监听器(无论底层 ReentrantLock 是否真正释放)
                 fireExpired(key);
             }
@@ -380,7 +395,7 @@ public class CHMRLock implements AutoCloseable {
         try {
             lockEntry.lock.lockInterruptibly();
             successLocks.incrementAndGet();
-            lockEntry.touchLastAcquireTime();
+            lockEntry.touchLastAcquireTime(config.clock());
             lockEntry.setOwnerThreadId(Thread.currentThread().getId());
             // 重新获取时复位 forceUnlock 哨兵
             lockEntry.clearForceUnlocked();
@@ -569,6 +584,13 @@ public class CHMRLock implements AutoCloseable {
      */
     public boolean tryMultiLock(long waitTime, long leaseTime, TimeUnit timeUnit, String... keys) {
         if (keys == null || keys.length == 0) return true;
+        Objects.requireNonNull(timeUnit, "timeUnit must not be null");
+
+        // 显式校验数组中是否含有 null — 否则后续 Comparator.naturalOrder()
+        // (在 distinct/sorted 中)会抛 NPE,且错误信息不友好。
+        for (String k : keys) {
+            Objects.requireNonNull(k, "keys array must not contain null");
+        }
 
         // Sort + dedupe: lexicographic ordering prevents deadlock across threads,
         // and distinct() ensures each key is acquired at most once.
@@ -634,14 +656,22 @@ public class CHMRLock implements AutoCloseable {
      * (例如另一个线程刚调用了 forceUnlock),本方法会再次检查哨兵并按哨兵路径处理;
      * 仅当哨兵确实未置位时才重新抛出异常,标记为跨线程 unlock。</p>
      *
-     * @throws LockNotFoundException key 从未加锁
+     * <p><b>关于未知 key:</b>若 key 已被清理线程释放(常见于 maxKeys 限制触发或
+     * 后台清理已将该 entry 移除),此方法为 no-op 并记录 FINE 级别日志 ——
+     * 不抛 {@link LockNotFoundException}。这样保证 {@link AcquiredLock#close()}
+     * 在清理后调用 unlock 不会失败,且 {@link LockListener#onLockReleased} 的
+     * 触发不会被静默吞掉。</p>
+     *
      * @throws IllegalMonitorStateException 锁未被当前线程持有(跨线程 unlock)
      */
     public void unlock(String key) {
         Objects.requireNonNull(key, "key must not be null");
         LockEntry lockEntry = lockMap.get(key);
         if (lockEntry == null) {
-            throw new LockNotFoundException(key);
+            // Entry 已被清理(典型场景:后台清理线程在 lockMap 中移除了该 key)。
+            // 视为幂等 no-op,记录 FINE 级别日志,避免 AcquiredLock.close() 失败。
+            log.fine("unlock: key not found, likely cleaned up: " + key);
+            return;
         }
         // 哨兵已置位:跳过底层 unlock,清理状态
         if (lockEntry.isForceUnlocked()) {
@@ -915,7 +945,14 @@ public class CHMRLock implements AutoCloseable {
         }
     }
 
-    /** 关闭锁管理器，停止清理线程并清空所有锁。幂等，可多次调用。 */
+    /**
+     * 关闭锁管理器，停止清理线程并清空所有锁。幂等，可多次调用。
+     *
+     * <p><b>注意:</b>此方法仅发起关闭请求,不等待进行中的任务完成。in-flight 的
+     * tryLock / tryAcquire 调用可能仍在执行;若需确保清理线程与异步任务完全终止,
+     * 建议在外部等待一个合理的超时(例如 {@code awaitTermination(5, SECONDS)})。
+     * 本方法不等任何 lockMap 中的活动线程解锁 — 这些锁的释放由调用方自行负责。</p>
+     */
     public void shutdown() {
         if (shutdownCalled.compareAndSet(false, true)) {
             lockMap.clear();
@@ -966,6 +1003,11 @@ public class CHMRLock implements AutoCloseable {
 
     /**
      * 返回所有曾加锁 key 的统计指标快照。需 {@link CHMRLockConfig#enablePerKeyMetrics} 为 true。
+     *
+     * <p><b>注意:</b>此方法返回弱一致性快照,不同 key 的统计可能反映不同时间点。
+     * 由于 lockMap 在并发环境下持续变化,迭代过程中 key 可能被清理线程移除或新增,
+     * 同一 map 中各 entry 的读顺序与底层状态完全无锁同步。适合用于监控/展示场景,
+     * 不适合用于精确的事务性比较。</p>
      *
      * @return 不可变 Map；key -> 指标快照。未启用 metrics 时返回空 Map。
      */

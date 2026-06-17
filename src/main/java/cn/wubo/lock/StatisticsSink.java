@@ -37,15 +37,15 @@ import java.util.Map;
  *     }
  * }
  *
- * // CHMRLock 配置:
- * CHMRLockConfig config = CHMRLockConfig.builder()
- *     .statisticsSink(new JdbcStatisticsSink(dataSource))
- *     .statisticsSinkInterval(Duration.ofSeconds(30))
- *     .build();
+ * // CHMRLock 调用(由调用方自行周期性触发,CHMRLock 当前不内置调度):
+ * ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+ * CHMRLock lockManager = new CHMRLock();
+ * scheduler.scheduleAtFixedRate(() -> {
+ *     lockManager.getAllStatistics();  // 获取全局+perKey 快照
+ *     // ...调用 sink.record(...) 由调用方自行决定如何传入
+ * }, 0, 30, TimeUnit.SECONDS);
  * }</pre>
  *
- * @see CHMRLockConfig.Builder#statisticsSink(StatisticsSink)
- * @see CHMRLockConfig.Builder#statisticsSinkInterval(Duration)
  * @since 2.0.0
  */
 public interface StatisticsSink {
