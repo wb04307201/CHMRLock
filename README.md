@@ -11,6 +11,9 @@
 - **租约模式**：可设置 `leaseTime`，到期后通过 `isLocked` 报告锁已释放（需原线程主动 `unlock`）
 - **超时控制**：`tryLock` 支持自定义等待时长
 - **可观测**：`MonitorMetrics` 全局统计（成功率、平均等待时间等）
+- **per-key 统计**：`getStatistics(key)` / `getAllStatistics()` 提供每个 key 的细粒度指标（需 `enablePerKeyMetrics=true`）
+- **事件监听**：`LockListener` 接口支持监听锁的获取/释放/失败/到期/争用事件
+- **指标导出**：`MetricsExporter` SPI + 默认 `JsonMetricsExporter` 实现，支持自定义导出格式（Prometheus / StatsD 等）
 - **生命周期安全**：`shutdown()` 幂等，清理线程为守护线程
 - **try-with-resources**：`AcquiredLock` 实现 `AutoCloseable`
 - **内存安全**：`maxKeys` 配置可限制最大 key 数，防止内存泄漏
@@ -91,6 +94,7 @@ CHMRLockConfig config = CHMRLockConfig.builder()
     .idleThreshold(Duration.ofMinutes(10))
     .cleanupInterval(Duration.ofSeconds(30))
     .maxKeys(10_000)
+    .enablePerKeyMetrics(true)   // 开启 per-key 统计（默认 false）
     .build();
 CHMRLock lock = new CHMRLock(config);
 ```
@@ -106,6 +110,8 @@ CHMRLock lock = new CHMRLock(config);
 | `isLocked(key)` / `isHeldByCurrentThread(key)` / `getHoldCount(key)` | 查询 |
 | `getActiveKeys()` | 当前所有 key（不可变视图） |
 | `getStatistics()` | 全局指标 |
+| `getStatistics(key)` / `getAllStatistics()` | per-key 统计（需 `enablePerKeyMetrics=true`） |
+| `registerListener(LockListener)` / `unregisterListener(LockListener)` | 事件监听 |
 | `shutdown()` / `close()` | 生命周期终止（幂等） |
 
 ## 监控
@@ -117,6 +123,93 @@ System.out.println("成功率: " + global.getSuccessRate());
 System.out.println("平均等待: " + global.getAvgWaitTime() + "ms");
 ```
 
+### per-key 统计
+
+启用 per-key 统计后，可以查看每个 key 的细粒度指标：
+
+```java
+CHMRLockConfig config = CHMRLockConfig.builder()
+    .enablePerKeyMetrics(true)  // 默认 false，零开销
+    .build();
+try (CHMRLock lock = new CHMRLock(config)) {
+    if (lock.tryLock("resource_id")) {
+        try {
+            doWork();
+        } finally {
+            lock.unlock("resource_id");
+        }
+    }
+
+    // 查看单个 key 的指标
+    lock.getStatistics("resource_id").ifPresent(stats -> {
+        System.out.println("获取次数: " + stats.acquireCount());
+        System.out.println("成功率: " + stats.getSuccessRate());
+        System.out.println("平均等待: " + stats.getAvgWaitTimeMillis() + "ms");
+    });
+
+    // 查看所有 key
+    lock.getAllStatistics().forEach((key, stats) -> {
+        System.out.println(key + " -> " + stats);
+    });
+}
+```
+
+> 默认 `enablePerKeyMetrics=false`，所有 per-key 计数器不会触达，零性能开销。
+
+### 事件监听
+
+实现 `LockListener` 接口监听锁生命周期事件：
+
+```java
+lock.registerListener(new LockListener() {
+    @Override
+    public void onLockAcquired(String key, long waitNanos) {
+        System.out.println("acquired: " + key);
+    }
+    @Override
+    public void onLockFailed(String key, long waitNanos, String reason) {
+        System.err.println("failed: " + key + " (" + reason + ")");
+    }
+});
+```
+
+5 个事件：`onLockAcquired` / `onLockReleased` / `onLockFailed` / `onLockExpired` / `onLockContended`。所有方法默认 no-op，实现类按需覆盖。监听器抛出的异常会被吞掉，不会影响锁功能。
+
+### 指标导出
+
+`MetricsExporter` SPI 用于把指标导出到外部系统：
+
+```java
+// 使用默认的 JSON 导出器（输出到 System.out）
+JsonMetricsExporter exporter = new JsonMetricsExporter();
+// ... Task 38 will add CHMRLock.exportMetrics(exporter); for now:
+exporter.export(lock.getStatistics(), lock.getAllStatistics());
+```
+
+输出格式：
+
+```json
+{
+  "global": {
+    "totalLocks": 10,
+    "successLocks": 9,
+    "failedLocks": 1,
+    "totalWaitTime": 1500,
+    "successRate": 0.9,
+    "avgWaitTime": 150.0
+  },
+  "perKey": {
+    "resource_id": {
+      "acquireCount": 10,
+      "successCount": 9,
+      ...
+    }
+  }
+}
+```
+
+可以自定义实现（对接 Prometheus / StatsD / InfluxDB 等）。
+
 ## 行为约定
 
 - **非公平锁**：默认使用 `ReentrantLock(false)`
@@ -126,6 +219,9 @@ System.out.println("平均等待: " + global.getAvgWaitTime() + "ms");
 - **跨线程 `unlock` 抛 `IllegalMonitorStateException`**：调用方需保证锁由当前线程释放
 - **`unlock` 未知 key 抛 `LockNotFoundException`**：防止误用掩盖 bug
 - **`maxKeys` 限制同时持有的 key 数**：超过后 `tryLock` 返回 `false`
+- **per-key 统计默认关闭**：`enablePerKeyMetrics=false` 时所有 per-key 计数操作零开销
+- **事件监听器异常隔离**：监听器抛异常会被捕获并忽略，不影响锁功能
+- **租约到期事件**：由于 `ReentrantLock` 不支持跨线程强制释放，`onLockExpired` 触发后租约状态已清理，但底层锁可能仍由原持有线程持有 — 需通过 `isLocked` 验证或显式 `unlock`
 
 ## 注意事项
 
