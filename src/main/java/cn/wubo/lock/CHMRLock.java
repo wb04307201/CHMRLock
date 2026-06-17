@@ -94,11 +94,16 @@ public class CHMRLock {
     }
 
     /**
-     * 释放锁
+     * 释放锁。key 必须已经通过 tryLock 成功获取。
+     * @throws LockNotFoundException key 从未加锁
+     * @throws IllegalMonitorStateException 锁未被当前线程持有（跨线程 unlock）
      */
     public void unlock(String key) {
         LockEntry lockEntry = lockMap.get(key);
-        if (lockEntry != null) lockEntry.lock.unlock();
+        if (lockEntry == null) {
+            throw new LockNotFoundException(key);
+        }
+        lockEntry.lock.unlock();
     }
 
     public void shutdown() {

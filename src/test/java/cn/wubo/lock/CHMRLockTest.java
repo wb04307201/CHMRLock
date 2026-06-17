@@ -191,4 +191,20 @@ public class CHMRLockTest {
         // 验证至少有一些线程成功获取了锁
         assertFalse(acquisitionOrder.isEmpty(), "应有线程成功获取锁");
     }
+
+    @Test
+    public void testUnlockUnknownKeyThrows() {
+        LockNotFoundException ex = assertThrows(LockNotFoundException.class,
+                () -> lockManager.unlock("never_locked"));
+        assertTrue(ex.getMessage().contains("never_locked"));
+    }
+
+    @Test
+    public void testUnlockAfterReleaseThrows() {
+        assertTrue(lockManager.tryLock("temp"));
+        lockManager.unlock("temp");
+        // 释放后 entry 仍存在但 lock 未持有
+        assertThrows(IllegalMonitorStateException.class,
+                () -> lockManager.unlock("temp"));
+    }
 }
