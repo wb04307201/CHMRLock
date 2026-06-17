@@ -81,12 +81,16 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 获取锁（指定等待时间和租约时间）。租约到期后若锁仍被持有则强制释放。
+     * 获取锁，指定等待时间与租约时间。
+     * 租约到期后会通过 {@link #isLocked(String)} 报告锁已释放，但底层 ReentrantLock
+     * 仍由原持有线程持有（ReentrantLock.unlock 要求 owner 线程）。
+     * 真正跨线程强制释放需调用 {@link #unlock(String)} 或后续版本的 forceUnlock。
      *
-     * @param key       锁的 key
-     * @param waitTime  等待时间
-     * @param leaseTime 租约时间，<= 0 表示无租约
-     * @param timeUnit  时间单位
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param leaseTime 租约时间（毫秒），0 表示无租约
+     * @param timeUnit 时间单位
+     * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         long startTime = System.currentTimeMillis();
@@ -161,6 +165,10 @@ public class CHMRLock implements AutoCloseable {
         lockEntry.clearLease();
     }
 
+    /**
+     * 判断 key 当前是否被锁。注意：若启用了租约，租约到期后此方法会返回 false，
+     * 但底层 ReentrantLock 仍由原持有线程持有，直到调用 unlock。
+     */
     public boolean isLocked(String key) {
         LockEntry e = lockMap.get(key);
         if (e == null) return false;
