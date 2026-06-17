@@ -96,16 +96,16 @@ public class CHMRLock implements AutoCloseable {
     public CHMRLock(CHMRLockConfig config) {
         this.config = config;
         this.defaultWaitTime = config.defaultWaitTime().toMillis();
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config));
-        this.asyncExecutor = Executors.newCachedThreadPool(daemonThreadFactory(config));
+        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config, "chmrlock-cleanup"));
+        // 异步获取锁的线程池:无界 cached 线程池,线程按需创建(无任务时立即回收)。
+        this.asyncExecutor = Executors.newCachedThreadPool(daemonThreadFactory(config, "chmrlock-async"));
 
         // 启动后台清理线程
         startCleanupThread();
     }
 
-    private static ThreadFactory daemonThreadFactory(CHMRLockConfig config) {
+    private static ThreadFactory daemonThreadFactory(CHMRLockConfig config, String prefix) {
         AtomicInteger seq = new AtomicInteger(1);
-        String prefix = "chmrlock-cleanup";
         return r -> {
             Thread t = new Thread(r, prefix + "-" + seq.getAndIncrement());
             t.setDaemon(config.daemonCleanupThread());
@@ -430,26 +430,19 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 异步获取锁,返回 CompletableFuture&lt;Boolean&gt;。底层使用独立线程池,不会阻塞调用线程。
-     *
-     * <p>底层调用 {@link #tryLock(String)} (使用 {@code defaultWaitTime} 作为等待时间)。</p>
-     *
-     * @param key 锁标识
-     * @return CompletableFuture&lt;Boolean&gt;: true=获取成功,false=超时
-     */
-    public CompletableFuture<Boolean> acquireAsync(String key) {
-        return CompletableFuture.supplyAsync(() -> tryLock(key), asyncExecutor);
-    }
-
-    /**
      * 异步获取锁,带超时。底层使用独立线程池,不会阻塞调用线程。
+     *
+     * <p>底层由专用守护线程池执行,不会阻塞调用线程。线程命名格式为 {@code chmrlock-async-N}。</p>
+     * <p><b>注意:</b>取消返回的 future 不会中断底层加锁;若加锁成功,锁仍由异步线程持有,
+     *    必须通过 {@link #unlock(String)} 或 {@link #forceUnlock(String)} 释放。</p>
+     * <p>在 {@link #shutdown()} 之后调用可能立即抛出 {@link RejectedExecutionException}。</p>
      *
      * @param key 锁标识
      * @param waitTime 等待获取的最长时间
      * @param timeUnit 时间单位
      * @return CompletableFuture&lt;Boolean&gt;: true=获取成功,false=超时
      */
-    public CompletableFuture<Boolean> acquireAsync(String key, long waitTime, TimeUnit timeUnit) {
+    public CompletableFuture<Boolean> tryAcquireAsync(String key, long waitTime, TimeUnit timeUnit) {
         return CompletableFuture.supplyAsync(() -> tryLock(key, waitTime, timeUnit), asyncExecutor);
     }
 
@@ -457,6 +450,14 @@ public class CHMRLock implements AutoCloseable {
      * 异步获取锁并返回 {@link AcquiredLock} 包装(支持 try-with-resources)。
      * 底层使用独立线程池,不会阻塞调用线程。语义与 {@link #tryAcquire(String)} 一致
      * (非可重入:若当前线程已持有 key,返回 {@code Optional.empty()})。
+     *
+     * <p>底层由专用守护线程池执行,不会阻塞调用线程。线程命名格式为 {@code chmrlock-async-N}。</p>
+     * <p>返回的 {@link AcquiredLock} 的持有线程为执行加锁的异步线程 ——
+     *    若从调用线程调用 {@code close()},由于 ReentrantLock 不允许跨线程释放,
+     *    实际不会释放锁(异常会被吞掉)。</p>
+     * <p><b>注意:</b>取消返回的 future 不会中断底层加锁;若加锁成功,锁仍由异步线程持有,
+     *    必须通过 {@link #unlock(String)} 或 {@link #forceUnlock(String)} 释放。</p>
+     * <p>在 {@link #shutdown()} 之后调用可能立即抛出 {@link RejectedExecutionException}。</p>
      *
      * @param key 锁标识
      * @return CompletableFuture&lt;Optional&lt;AcquiredLock&gt;&gt;: 成功时 Optional 非空,否则空
