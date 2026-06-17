@@ -14,6 +14,7 @@ public record CHMRLockConfig(
         boolean forceUnlockOnLeaseExpiry,
         boolean fairLock,
         boolean enablePerKeyMetrics,
+        boolean forceUnlockEnabled,
         Clock clock
 ) {
     public CHMRLockConfig {
@@ -33,7 +34,7 @@ public record CHMRLockConfig(
         return new CHMRLockConfig(
                 Duration.ofSeconds(3), Duration.ZERO,
                 Duration.ofMinutes(5), Duration.ofSeconds(1),
-                0L, true, true, false, false, Clock.systemUTC());
+                0L, true, true, false, false, false, Clock.systemUTC());
     }
 
     public static Builder builder() { return new Builder(); }
@@ -48,6 +49,7 @@ public record CHMRLockConfig(
         private boolean forceUnlockOnLeaseExpiry = true;
         private boolean fairLock = false;
         private boolean enablePerKeyMetrics = false;
+        private boolean forceUnlockEnabled = false;
         private Clock clock = Clock.systemUTC();
 
         public Builder defaultWaitTime(Duration d) { this.defaultWaitTime = d; return this; }
@@ -59,12 +61,13 @@ public record CHMRLockConfig(
         public Builder forceUnlockOnLeaseExpiry(boolean b) { this.forceUnlockOnLeaseExpiry = b; return this; }
         public Builder fairLock(boolean b) { this.fairLock = b; return this; }
         public Builder enablePerKeyMetrics(boolean b) { this.enablePerKeyMetrics = b; return this; }
+        public Builder forceUnlockEnabled(boolean b) { this.forceUnlockEnabled = b; return this; }
         public Builder clock(Clock c) { this.clock = c; return this; }
         public CHMRLockConfig build() {
             return new CHMRLockConfig(defaultWaitTime, defaultLeaseTime,
                     idleThreshold, cleanupInterval, maxKeys,
                     daemonCleanupThread, forceUnlockOnLeaseExpiry,
-                    fairLock, enablePerKeyMetrics, clock);
+                    fairLock, enablePerKeyMetrics, forceUnlockEnabled, clock);
         }
     }
 }

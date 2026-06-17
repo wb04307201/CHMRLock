@@ -1,5 +1,6 @@
 package cn.wubo.lock;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -14,6 +15,12 @@ class LockEntry {
     private final AtomicLong totalWaitNanos = new AtomicLong(0);
     /** 释放时间戳(epoch millis); 0 表示从未释放。 */
     private final AtomicLong lastReleaseTime = new AtomicLong(0L);
+    /**
+     * 跨线程强制释放哨兵。当 {@code forceUnlock(key)} 被调用时置位，
+     * {@code isLocked()} 据此返回 {@code false}，即便底层 ReentrantLock
+     * 仍由原持有线程持有。
+     */
+    private final AtomicBoolean forceUnlocked = new AtomicBoolean(false);
 
     LockEntry() {
         this(false);
@@ -49,6 +56,21 @@ class LockEntry {
     void setLeaseEndTime(long epochMillis) { leaseEndTime.set(epochMillis); }
 
     void clearLease() { leaseEndTime.set(Long.MAX_VALUE); }
+
+    boolean isForceUnlocked() { return forceUnlocked.get(); }
+
+    /**
+     * 标记该 entry 已被 {@code forceUnlock} 释放：清空 owner / lease 并置位哨兵。
+     * 该方法幂等：哨兵原子置位仅生效一次。
+     */
+    void markForceUnlocked() {
+        forceUnlocked.set(true);
+        clearOwner();
+        clearLease();
+    }
+
+    /** 清除 forceUnlock 哨兵(用于下一次获取锁时复位状态)。 */
+    void clearForceUnlocked() { forceUnlocked.set(false); }
 
     long getAcquireCount() { return acquireCount.get(); }
     long getSuccessCount() { return successCount.get(); }

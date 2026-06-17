@@ -217,6 +217,8 @@ public class CHMRLock implements AutoCloseable {
                 successLocks.incrementAndGet();
                 lockEntry.touchLastAcquireTime();
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
+                // 重新获取时复位 forceUnlock 哨兵，使后续 isLocked 反映真实状态
+                lockEntry.clearForceUnlocked();
                 if (perKeyMetrics) {
                     lockEntry.recordAcquireSuccess(System.nanoTime() - startNanos);
                 }
@@ -343,6 +345,8 @@ public class CHMRLock implements AutoCloseable {
             successLocks.incrementAndGet();
             lockEntry.touchLastAcquireTime();
             lockEntry.setOwnerThreadId(Thread.currentThread().getId());
+            // 重新获取时复位 forceUnlock 哨兵
+            lockEntry.clearForceUnlocked();
             if (leaseTime > 0) {
                 long leaseEnd = config.clock().millis() + timeUnit.toMillis(leaseTime);
                 lockEntry.setLeaseEndTime(leaseEnd);
@@ -439,12 +443,58 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
+     * 强制释放指定 key 的锁，可从任意线程调用，绕过 owner 检查。
+     *
+     * <p>由于 {@link java.util.concurrent.locks.ReentrantLock} 的 {@code unlock}
+     * 要求 owner 线程，从其他线程真正释放底层锁需要反射 AQS 内部状态（脆弱、依赖 JDK 版本）。
+     * 本方法的实际行为是：尝试调用底层 {@code unlock}（若当前线程即 owner 则成功；
+     * 若非 owner 则会抛 {@link IllegalMonitorStateException}，被静默忽略），
+     * 然后通过 {@link LockEntry} 中的 forceUnlock 哨兵把 owner / lease 状态清空，
+     * 并让 {@link #isLocked(String)} 报告该 key 已释放。后续若同一线程再次调用
+     * {@link #tryLock(String)} 成功，哨兵会被自动清除。</p>
+     *
+     * <p>对未知 key 是 no-op（idempotent）。对已释放 key 也是 no-op。</p>
+     *
+     * <p>需 {@link CHMRLockConfig#forceUnlockEnabled()} 为 true，否则抛
+     * {@link UnsupportedOperationException}。</p>
+     *
+     * @param key 锁标识
+     * @throws UnsupportedOperationException 若 {@code config.forceUnlockEnabled()} 为 false
+     */
+    public void forceUnlock(String key) {
+        if (!config.forceUnlockEnabled()) {
+            throw new UnsupportedOperationException(
+                    "forceUnlock is not enabled. Set CHMRLockConfig.forceUnlockEnabled(true) to enable.");
+        }
+        LockEntry lockEntry = lockMap.get(key);
+        if (lockEntry == null) {
+            // 未知 key：幂等 no-op
+            return;
+        }
+        // 尝试底层 unlock：若当前线程即 owner 则成功；非 owner 抛 IllegalMonitorStateException
+        try {
+            lockEntry.lock.unlock();
+        } catch (IllegalMonitorStateException ignored) {
+            // 跨线程 unlock 失败，仅清理 CHMRLock 状态
+        }
+        // 哨兵置位：isLocked 据此返回 false，owner / lease 清空
+        lockEntry.markForceUnlocked();
+        if (config.enablePerKeyMetrics()) {
+            lockEntry.recordRelease(config.clock().millis());
+        }
+        fireReleased(key, config.clock().millis() - lockEntry.getLastAcquireTime());
+    }
+
+    /**
      * 判断 key 当前是否被锁。注意：若启用了租约，租约到期后此方法会返回 false，
      * 但底层 ReentrantLock 仍由原持有线程持有，直到调用 unlock。
+     * 调用 {@link #forceUnlock(String)} 后此方法同样返回 false。
      */
     public boolean isLocked(String key) {
         LockEntry e = lockMap.get(key);
         if (e == null) return false;
+        // forceUnlock 已置位：从 CHMRLock 视角看已释放
+        if (e.isForceUnlocked()) return false;
         if (!e.lock.isLocked()) return false;
         // 租约到期视为已释放（ReentrantLock 不支持跨线程 force-unlock）
         if (config.clock().millis() > e.getLeaseEndTime()) {
@@ -469,6 +519,15 @@ public class CHMRLock implements AutoCloseable {
     public int getHoldCount(String key) {
         LockEntry e = lockMap.get(key);
         return e == null ? 0 : e.lock.getHoldCount();
+    }
+
+    /**
+     * @param key 锁标识
+     * @return 当前持有该 key 的线程 id；key 不存在或未被持有返回 {@code null}
+     */
+    public Long getOwnerThreadId(String key) {
+        LockEntry e = lockMap.get(key);
+        return e == null ? null : e.getOwnerThreadId();
     }
 
     /**
