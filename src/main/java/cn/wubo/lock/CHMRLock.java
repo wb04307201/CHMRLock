@@ -84,6 +84,19 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
+     * 统计当前持有中的 entry 数量（用于 maxKeys 限制）。
+     * 注意：仅扫描持有中的锁，释放后的 entry 不占 slot，
+     * 避免 unlock → tryLock 新 key 的常见模式被错误阻塞。
+     */
+    private long countHeldEntries() {
+        long count = 0;
+        for (LockEntry le : lockMap.values()) {
+            if (le.lock.isLocked()) count++;
+        }
+        return count;
+    }
+
+    /**
      * 获取锁（使用默认等待时间）
      */
     public boolean tryLock(String key) {
@@ -112,6 +125,18 @@ public class CHMRLock implements AutoCloseable {
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         long startTime = System.currentTimeMillis();
         totalLocks.incrementAndGet();
+
+        // maxKeys 限制：仅对"新 key"（不在 map 中）生效，已存在的 key 可重入
+        // 计数维度：仅统计当前"持有中"的 entry（isLocked == true），
+        // 释放后的 entry 不占 slot，否则 unlock → tryLock 新 key 的常见模式会被阻塞
+        if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
+            if (countHeldEntries() >= config.maxKeys()) {
+                failedLocks.incrementAndGet();
+                totalWaitTime.addAndGet(System.currentTimeMillis() - startTime);
+                return false;
+            }
+        }
+
         LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry());
 
         try {
