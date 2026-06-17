@@ -9,6 +9,38 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
+/**
+ * 基于 {@link java.util.concurrent.ConcurrentHashMap} 和 {@link java.util.concurrent.locks.ReentrantLock} 的细粒度单机锁库。
+ *
+ * <p>每个 String key 维护一把独立的锁。线程安全、零三方依赖、支持 try-with-resources 和租约模式。</p>
+ *
+ * <p>典型用法：</p>
+ * <pre>{@code
+ * CHMRLock lock = new CHMRLock();
+ * try {
+ *     if (lock.tryLock("resource_id")) {
+ *         try {
+ *             doWork();
+ *         } finally {
+ *             lock.unlock("resource_id");
+ *         }
+ *     }
+ * } finally {
+ *     lock.shutdown();
+ * }
+ * }</pre>
+ *
+ * <h2>行为约定</h2>
+ * <ul>
+ *   <li>默认非公平锁（{@code ReentrantLock(false)}）</li>
+ *   <li>清理线程为守护线程（命名 {@code chmrlock-cleanup-N}）</li>
+ *   <li>{@link #shutdown()} 幂等，可多次调用</li>
+ *   <li>{@link #unlock(String)} 跨线程调用会抛 {@link IllegalMonitorStateException}</li>
+ * </ul>
+ *
+ * @see CHMRLockConfig
+ * @see AcquiredLock
+ */
 public class CHMRLock implements AutoCloseable {
     // 配置
     private final CHMRLockConfig config;
@@ -32,16 +64,26 @@ public class CHMRLock implements AutoCloseable {
     private final AtomicBoolean shutdownCalled = new AtomicBoolean(false);
 
 
+    /** 使用默认配置创建实例。详见 {@link CHMRLockConfig#defaults()}。 */
     public CHMRLock() {
         this(CHMRLockConfig.defaults());
     }
 
+    /**
+     * 使用指定默认等待时间创建实例，其余配置使用默认值。
+     * @param defaultWaitTime 默认等待时长
+     * @param timeUnit 时间单位
+     */
     public CHMRLock(long defaultWaitTime, TimeUnit timeUnit) {
         this(CHMRLockConfig.builder()
                 .defaultWaitTime(Duration.ofMillis(timeUnit.toMillis(defaultWaitTime)))
                 .build());
     }
 
+    /**
+     * 使用自定义配置创建实例。
+     * @param config 锁配置（不可为 null）
+     */
     public CHMRLock(CHMRLockConfig config) {
         this.config = config;
         this.defaultWaitTime = config.defaultWaitTime().toMillis();
@@ -97,14 +139,20 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 获取锁（使用默认等待时间）
+     * 尝试获取指定 key 的锁，等待最多 {@code defaultWaitTime}（默认 3 秒）。
+     * @param key 锁标识
+     * @return 是否成功获取
      */
     public boolean tryLock(String key) {
         return tryLock(key, defaultWaitTime, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * 获取锁（指定等待时间）
+     * 尝试获取指定 key 的锁，等待最多 {@code waitTime}。
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param timeUnit 时间单位
+     * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime, TimeUnit timeUnit) {
         return tryLock(key, waitTime, 0, timeUnit);
@@ -186,12 +234,21 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 获取锁（指定等待时间）
+     * 尝试获取指定 key 的锁，等待最多 {@code waitTime} 毫秒。
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间（毫秒）
+     * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime){
         return tryLock(key, waitTime, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * 非可重入版本的 tryLock，返回 AcquiredLock 以支持 try-with-resources。
+     * 与 tryLock 不同：若当前线程已持有 key，返回 Optional.empty()。
+     * @param key 锁标识
+     * @return 成功时返回包含 AcquiredLock 的 Optional，失败返回空
+     */
     public Optional<AcquiredLock> tryAcquire(String key) {
         return tryAcquire(key, defaultWaitTime, 0, TimeUnit.MILLISECONDS);
     }
@@ -254,20 +311,34 @@ public class CHMRLock implements AutoCloseable {
         return true;
     }
 
+    /**
+     * @param key 锁标识
+     * @return 当前线程是否持有该 key；key 不存在返回 false
+     */
     public boolean isHeldByCurrentThread(String key) {
         LockEntry e = lockMap.get(key);
         return e != null && e.lock.isHeldByCurrentThread();
     }
 
+    /**
+     * @param key 锁标识
+     * @return 当前线程对该 key 的重入深度；key 不存在返回 0
+     */
     public int getHoldCount(String key) {
         LockEntry e = lockMap.get(key);
         return e == null ? 0 : e.lock.getHoldCount();
     }
 
+    /**
+     * @return 当前所有已注册 key 的不可变视图。对返回集合的修改会抛
+     *         {@link UnsupportedOperationException}，但底层 map 的后续变更会反映在
+     *         下次调用此方法的结果中。
+     */
     public Set<String> getActiveKeys() {
         return Collections.unmodifiableSet(lockMap.keySet());
     }
 
+    /** 关闭锁管理器，停止清理线程并清空所有锁。幂等，可多次调用。 */
     public void shutdown() {
         if (shutdownCalled.compareAndSet(false, true)) {
             lockMap.clear();
@@ -277,15 +348,18 @@ public class CHMRLock implements AutoCloseable {
         }
     }
 
+    /** @return 是否已调用过 {@link #shutdown()} */
     public boolean isShutdown() {
         return shutdownCalled.get();
     }
 
+    /** {@link AutoCloseable#close()} 实现，等价于 {@link #shutdown()}。支持 try-with-resources。 */
     @Override
     public void close() {
         shutdown();
     }
 
+    /** @return 全局统计指标快照 */
     public MonitorMetrics getStatistics() {
         return new MonitorMetrics(
                 totalLocks.get(),
