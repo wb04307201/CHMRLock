@@ -123,6 +123,21 @@ public class CHMRLock implements AutoCloseable {
         lockEntry.clearOwner();
     }
 
+    public boolean isLocked(String key) {
+        LockEntry e = lockMap.get(key);
+        return e != null && e.lock.isLocked();
+    }
+
+    public boolean isHeldByCurrentThread(String key) {
+        LockEntry e = lockMap.get(key);
+        return e != null && e.lock.isHeldByCurrentThread();
+    }
+
+    public int getHoldCount(String key) {
+        LockEntry e = lockMap.get(key);
+        return e == null ? 0 : e.lock.getHoldCount();
+    }
+
     public void shutdown() {
         if (shutdownCalled.compareAndSet(false, true)) {
             lockMap.clear();
