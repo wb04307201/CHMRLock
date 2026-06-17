@@ -440,6 +440,7 @@ public class CHMRLock implements AutoCloseable {
 
     /**
      * 原子获取多个 key,带超时。失败时回滚已获取的锁。
+     * 等价于 {@code tryMultiLock(waitTime, 0, timeUnit, keys)} — 无租约。
      * @param waitTime 单个 key 的最大等待时间(总等待时间近似 N × waitTime,逐 key 递减)
      * @param timeUnit 时间单位
      * @param keys 要获取的 key 列表
@@ -453,6 +454,9 @@ public class CHMRLock implements AutoCloseable {
      * 原子获取多个 key,带超时与租约。失败时回滚。
      * 排序与去重:keys 按字典序排序以避免多线程按不同顺序加锁导致的死锁;
      * 重复 key 仅加锁一次。
+     *
+     * <p>每个 key 的等待时间随已用时间递减;为了避免最后一把锁的预算被截断为 0,
+     * 每个 key 至少获得 1ms 等待时间(可能略微超出用户指定的 {@code waitTime})。</p>
      *
      * @param waitTime 单个 key 的最大等待时间
      * @param leaseTime 租约时间,0 表示无租约
