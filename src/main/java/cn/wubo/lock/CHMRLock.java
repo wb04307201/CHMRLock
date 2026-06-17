@@ -173,6 +173,7 @@ public class CHMRLock implements AutoCloseable {
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         long startTime = config.clock().millis();
         totalLocks.incrementAndGet();
+        boolean perKeyMetrics = config.enablePerKeyMetrics();
 
         // maxKeys 限制：仅对"新 key"（不在 map 中）生效，已存在的 key 可重入
         // 计数维度：仅统计当前"持有中"的 entry（isLocked == true），
@@ -180,12 +181,24 @@ public class CHMRLock implements AutoCloseable {
         if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
             if (countHeldEntries() >= config.maxKeys()) {
                 failedLocks.incrementAndGet();
-                totalWaitTime.addAndGet(config.clock().millis() - startTime);
+                long elapsedMillis = config.clock().millis() - startTime;
+                totalWaitTime.addAndGet(elapsedMillis);
+                if (perKeyMetrics) {
+                    LockEntry existing = lockMap.get(key);
+                    if (existing != null) {
+                        existing.recordAcquireAttempt();
+                        existing.recordAcquireFailure(elapsedMillis * 1_000_000L);
+                    }
+                }
                 return false;
             }
         }
 
         LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry(config.fairLock()));
+
+        if (perKeyMetrics) {
+            lockEntry.recordAcquireAttempt();
+        }
 
         try {
             boolean acquired = lockEntry.lock.tryLock(waitTime, timeUnit);
@@ -193,6 +206,10 @@ public class CHMRLock implements AutoCloseable {
                 successLocks.incrementAndGet();
                 lockEntry.touchLastAcquireTime();
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
+                if (perKeyMetrics) {
+                    long elapsedMillis = config.clock().millis() - startTime;
+                    lockEntry.recordAcquireSuccess(elapsedMillis * 1_000_000L);
+                }
                 if (leaseTime > 0) {
                     long leaseEnd = config.clock().millis() + timeUnit.toMillis(leaseTime);
                     lockEntry.setLeaseEndTime(leaseEnd);
@@ -201,11 +218,19 @@ public class CHMRLock implements AutoCloseable {
                 return true;
             } else {
                 failedLocks.incrementAndGet();
+                if (perKeyMetrics) {
+                    long elapsedMillis = config.clock().millis() - startTime;
+                    lockEntry.recordAcquireFailure(elapsedMillis * 1_000_000L);
+                }
                 return false;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             failedLocks.incrementAndGet();
+            if (perKeyMetrics) {
+                long elapsedMillis = config.clock().millis() - startTime;
+                lockEntry.recordAcquireFailure(elapsedMillis * 1_000_000L);
+            }
             return false;
         } finally {
             totalWaitTime.addAndGet(config.clock().millis() - startTime);
@@ -294,6 +319,9 @@ public class CHMRLock implements AutoCloseable {
         lockEntry.lock.unlock();
         lockEntry.clearOwner();
         lockEntry.clearLease();
+        if (config.enablePerKeyMetrics()) {
+            lockEntry.recordRelease(config.clock().millis());
+        }
     }
 
     /**
@@ -366,6 +394,51 @@ public class CHMRLock implements AutoCloseable {
                 successLocks.get(),
                 failedLocks.get(),
                 totalWaitTime.get()
+        );
+    }
+
+    /**
+     * 返回指定 key 的统计指标快照。需 {@link CHMRLockConfig#enablePerKeyMetrics} 为 true。
+     *
+     * @param key 锁标识
+     * @return 指标快照；若 metrics 未启用或 key 从未加锁，返回 {@link Optional#empty()}
+     */
+    public Optional<KeyStatistics> getStatistics(String key) {
+        if (!config.enablePerKeyMetrics()) return Optional.empty();
+        LockEntry e = lockMap.get(key);
+        if (e == null) return Optional.empty();
+        return Optional.of(snapshotFor(key, e));
+    }
+
+    /**
+     * 返回所有曾加锁 key 的统计指标快照。需 {@link CHMRLockConfig#enablePerKeyMetrics} 为 true。
+     *
+     * @return 不可变 Map；key -> 指标快照。未启用 metrics 时返回空 Map。
+     */
+    public Map<String, KeyStatistics> getAllStatistics() {
+        if (!config.enablePerKeyMetrics()) return Collections.emptyMap();
+        Map<String, KeyStatistics> snapshot = new HashMap<>(lockMap.size());
+        for (Map.Entry<String, LockEntry> entry : lockMap.entrySet()) {
+            String k = entry.getKey();
+            LockEntry e = entry.getValue();
+            snapshot.put(k, snapshotFor(k, e));
+        }
+        return Collections.unmodifiableMap(snapshot);
+    }
+
+    private static KeyStatistics snapshotFor(String key, LockEntry e) {
+        Long holderId = e.getOwnerThreadId();
+        int holdCount = e.lock.getHoldCount();
+        return new KeyStatistics(
+                key,
+                e.getAcquireCount(),
+                e.getSuccessCount(),
+                e.getFailedCount(),
+                e.getTotalWaitNanos(),
+                e.getLastAcquireTime(),
+                e.getLastReleaseTime(),
+                holdCount,
+                holderId == null ? -1L : holderId
         );
     }
 }
