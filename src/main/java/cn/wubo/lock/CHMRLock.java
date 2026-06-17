@@ -901,4 +901,23 @@ public class CHMRLock implements AutoCloseable {
                 holderId == null ? -1L : holderId
         );
     }
+
+    /**
+     * 触发一次指标导出。内部调用 {@link MetricsExporter#export(MonitorMetrics, Map)},
+     * 传入 {@link #getStatistics()} 和 {@link #getAllStatistics()}。
+     *
+     * <p>导出器抛出的异常会被吞掉,不会影响锁功能(与监听器异常隔离一致)。</p>
+     *
+     * @param exporter 导出器实现(不可为 null)
+     * @throws NullPointerException 若 {@code exporter} 为 null
+     * @since 2.0.0
+     */
+    public void exportMetrics(MetricsExporter exporter) {
+        Objects.requireNonNull(exporter, "exporter must not be null");
+        try {
+            exporter.export(getStatistics(), getAllStatistics());
+        } catch (Exception e) {
+            log.warning("MetricsExporter failed: " + e.getMessage());
+        }
+    }
 }
