@@ -32,7 +32,12 @@ public interface LockListener {
      */
     default void onLockFailed(String key, long waitNanos, String reason) {}
 
-    /** 租约到期强制释放后触发。 */
+    /**
+     * 租约到期后触发。注意:由于 {@link java.util.concurrent.locks.ReentrantLock}
+     * 不支持跨线程强制释放,此事件触发后,租约状态(owner/leaseEndTime)已被清理,
+     * 但底层锁可能仍由原持有线程持有 — 调用方应通过 {@link CHMRLock#isLocked(String)}
+     * 验证实际状态,或调用 {@link CHMRLock#unlock(String)} 显式释放。
+     */
     default void onLockExpired(String key) {}
 
     /**

@@ -390,11 +390,9 @@ public class CHMRLock implements AutoCloseable {
         if (listener != null) listeners.add(listener);
     }
 
-    /**
-     * 注销一个监听器。注销未注册的实例是 no-op。
-     * @param listener 要移除的监听器实例
-     */
+    /** 注销一个监听器。{@code null} 被忽略；注销未注册的实例是 no-op。 */
     public void unregisterListener(LockListener listener) {
+        if (listener == null) return;
         listeners.remove(listener);
     }
 
