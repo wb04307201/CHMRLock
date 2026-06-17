@@ -283,6 +283,99 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
+     * 阻塞获取锁,无限等待,无租约。线程被中断时抛出 {@link InterruptedException}。
+     * 实现基于 {@link java.util.concurrent.locks.ReentrantLock#lockInterruptibly()},
+     * 因此等待期间可响应中断。
+     * @param key 锁标识
+     * @throws InterruptedException 等待获取过程中线程被中断
+     */
+    public void lock(String key) throws InterruptedException {
+        lock(key, 0, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 阻塞获取锁,无限等待,可指定租约时长。租约到期后 {@link #isLocked(String)}
+     * 会报告锁已释放,但底层 {@link java.util.concurrent.locks.ReentrantLock}
+     * 仍由原持有线程持有,需配合 {@link #unlock(String)} 释放。
+     *
+     * @param key 锁标识
+     * @param leaseTime 租约时长(>0);0 表示无租约
+     * @param timeUnit 时间单位
+     * @throws InterruptedException 等待获取过程中线程被中断
+     * @throws IllegalStateException 当 {@code maxKeys} 限制被触发时
+     */
+    public void lock(String key, long leaseTime, TimeUnit timeUnit) throws InterruptedException {
+        long startTime = config.clock().millis();
+        long startNanos = System.nanoTime();
+        totalLocks.incrementAndGet();
+        boolean perKeyMetrics = config.enablePerKeyMetrics();
+
+        // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入
+        if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
+            if (countHeldEntries() >= config.maxKeys()) {
+                failedLocks.incrementAndGet();
+                totalWaitTime.addAndGet(config.clock().millis() - startTime);
+                if (perKeyMetrics) {
+                    LockEntry existing = lockMap.get(key);
+                    if (existing != null) {
+                        existing.recordAcquireAttempt();
+                        existing.recordAcquireFailure(System.nanoTime() - startNanos);
+                    }
+                }
+                fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
+                throw new IllegalStateException("maxKeys limit reached: " + config.maxKeys());
+            }
+        }
+
+        LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry(config.fairLock()));
+
+        if (perKeyMetrics) {
+            lockEntry.recordAcquireAttempt();
+        }
+
+        try {
+            lockEntry.lock.lockInterruptibly();
+            successLocks.incrementAndGet();
+            lockEntry.touchLastAcquireTime();
+            lockEntry.setOwnerThreadId(Thread.currentThread().getId());
+            if (leaseTime > 0) {
+                long leaseEnd = config.clock().millis() + timeUnit.toMillis(leaseTime);
+                lockEntry.setLeaseEndTime(leaseEnd);
+                scheduleLeaseExpiry(key, leaseEnd);
+            }
+            if (perKeyMetrics) {
+                lockEntry.recordAcquireSuccess(System.nanoTime() - startNanos);
+            }
+            fireAcquired(key, System.nanoTime() - startNanos);
+        } catch (InterruptedException e) {
+            failedLocks.incrementAndGet();
+            if (perKeyMetrics) {
+                lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
+            }
+            fireFailed(key, System.nanoTime() - startNanos, "interrupted");
+            Thread.currentThread().interrupt();
+            throw e;
+        } finally {
+            totalWaitTime.addAndGet(config.clock().millis() - startTime);
+        }
+    }
+
+    /**
+     * 显式命名的可中断阻塞获取,语义等价于 {@link #lock(String, long, TimeUnit)}。
+     * 提供该方法是为了在 API 层显式表达"可中断"语义,便于调用方在需要时区分
+     * 普通阻塞 {@code lock} 与可中断阻塞。
+     *
+     * @param key 锁标识
+     * @param leaseTime 租约时长(>0);0 表示无租约
+     * @param timeUnit 时间单位
+     * @throws InterruptedException 等待获取过程中线程被中断
+     * @throws IllegalStateException 当 {@code maxKeys} 限制被触发时
+     */
+    public void lockInterruptibly(String key, long leaseTime, TimeUnit timeUnit) throws InterruptedException {
+        lock(key, leaseTime, timeUnit);
+    }
+
+    /**
      * 非可重入版本的 tryLock，返回 AcquiredLock 以支持 try-with-resources。
      * 与 tryLock 不同：若当前线程已持有 key，返回 Optional.empty()。
      * @param key 锁标识
