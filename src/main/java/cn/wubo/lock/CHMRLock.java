@@ -154,10 +154,24 @@ public class CHMRLock implements AutoCloseable {
         return tryAcquire(key, defaultWaitTime, 0, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * 获取锁并返回 AcquiredLock 包装，支持 try-with-resources。
+     * 与 tryLock 不同，tryAcquire 是非可重入的：如果当前线程已经持有 key，
+     * 返回 Optional.empty()。这保证了 AcquiredLock 包装与底层锁获取是 1:1 对应。
+     *
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param timeUnit 时间单位
+     * @return 成功则返回包含 AcquiredLock 的 Optional，否则空
+     */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, TimeUnit timeUnit) {
         return tryAcquire(key, waitTime, 0, timeUnit);
     }
 
+    /**
+     * 获取锁并返回 AcquiredLock 包装，支持 try-with-resources，可指定租约。
+     * 与 tryLock 不同，tryAcquire 是非可重入的：如果当前线程已经持有 key，返回 Optional.empty()。
+     */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         if (isHeldByCurrentThread(key)) {
             return Optional.empty();
