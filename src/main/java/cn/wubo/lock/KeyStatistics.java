@@ -9,6 +9,10 @@ public record KeyStatistics(
         long acquireCount,
         long successCount,
         long failedCount,
+        /**
+         * 累计等待时间(纳秒)。通过 System.nanoTime() 测量，精度为纳秒级。
+         * 注意:包含成功与失败两种获取的总等待时间。
+         */
         long totalWaitNanos,
         long lastAcquireEpochMs,
         long lastReleaseEpochMs,

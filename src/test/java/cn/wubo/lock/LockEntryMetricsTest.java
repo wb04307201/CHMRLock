@@ -46,9 +46,9 @@ class LockEntryMetricsTest {
     }
 
     @Test
-    void initialLastReleaseTimeIsMaxValue() {
+    void initialLastReleaseTimeIsZero() {
         LockEntry e = new LockEntry();
-        assertEquals(Long.MAX_VALUE, e.getLastReleaseTime());
+        assertEquals(0L, e.getLastReleaseTime());
     }
 
     @Test

@@ -59,7 +59,8 @@ class CHMRLockPerKeyMetricsTest {
             long beforeRelease = System.currentTimeMillis();
             lock.unlock("k1");
             KeyStatistics ks = lock.getStatistics("k1").orElseThrow();
-            assertTrue(ks.lastReleaseEpochMs() >= beforeRelease, "lastRelease should be >= before-release time");
+            assertTrue(ks.lastReleaseEpochMs() >= beforeRelease,
+                    "lastRelease should be >= before-release time, was: " + ks.lastReleaseEpochMs());
         }
     }
 

@@ -172,6 +172,7 @@ public class CHMRLock implements AutoCloseable {
      */
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         long startTime = config.clock().millis();
+        long startNanos = System.nanoTime();
         totalLocks.incrementAndGet();
         boolean perKeyMetrics = config.enablePerKeyMetrics();
 
@@ -187,7 +188,7 @@ public class CHMRLock implements AutoCloseable {
                     LockEntry existing = lockMap.get(key);
                     if (existing != null) {
                         existing.recordAcquireAttempt();
-                        existing.recordAcquireFailure(elapsedMillis * 1_000_000L);
+                        existing.recordAcquireFailure(System.nanoTime() - startNanos);
                     }
                 }
                 return false;
@@ -207,8 +208,7 @@ public class CHMRLock implements AutoCloseable {
                 lockEntry.touchLastAcquireTime();
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
                 if (perKeyMetrics) {
-                    long elapsedMillis = config.clock().millis() - startTime;
-                    lockEntry.recordAcquireSuccess(elapsedMillis * 1_000_000L);
+                    lockEntry.recordAcquireSuccess(System.nanoTime() - startNanos);
                 }
                 if (leaseTime > 0) {
                     long leaseEnd = config.clock().millis() + timeUnit.toMillis(leaseTime);
@@ -219,8 +219,7 @@ public class CHMRLock implements AutoCloseable {
             } else {
                 failedLocks.incrementAndGet();
                 if (perKeyMetrics) {
-                    long elapsedMillis = config.clock().millis() - startTime;
-                    lockEntry.recordAcquireFailure(elapsedMillis * 1_000_000L);
+                    lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
                 }
                 return false;
             }
@@ -228,8 +227,7 @@ public class CHMRLock implements AutoCloseable {
             Thread.currentThread().interrupt();
             failedLocks.incrementAndGet();
             if (perKeyMetrics) {
-                long elapsedMillis = config.clock().millis() - startTime;
-                lockEntry.recordAcquireFailure(elapsedMillis * 1_000_000L);
+                lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
             }
             return false;
         } finally {

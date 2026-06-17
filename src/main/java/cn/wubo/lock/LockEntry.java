@@ -12,7 +12,8 @@ class LockEntry {
     private final AtomicLong successCount = new AtomicLong(0);
     private final AtomicLong failedCount = new AtomicLong(0);
     private final AtomicLong totalWaitNanos = new AtomicLong(0);
-    private final AtomicLong lastReleaseTime = new AtomicLong(Long.MAX_VALUE);
+    /** 释放时间戳(epoch millis); 0 表示从未释放。 */
+    private final AtomicLong lastReleaseTime = new AtomicLong(0L);
 
     LockEntry() {
         this(false);
