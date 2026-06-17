@@ -123,15 +123,15 @@ if (lock.tryMultiLock(1, TimeUnit.SECONDS, "account:A", "account:B")) {
 不希望阻塞当前线程时，使用 `tryAcquireAsync`。加锁动作在专用守护线程池上执行。
 
 ```java
-CompletableFuture<Boolean> future = lock.tryAcquireAsync("resource_id", 1, TimeUnit.SECONDS);
-future.thenAccept(acquired -> {
-    if (acquired) {
-        try {
-            doWork();
-        } finally {
-            lock.unlock("resource_id");
-        }
+CompletableFuture<Optional<AcquiredLock>> future = lock.tryAcquireAsync("resource_id", 1, TimeUnit.SECONDS);
+future.thenAccept(maybeLock -> maybeLock.ifPresent(al -> {
+    try {
+        doWork();
+    } finally {
+        al.close();
     }
+}));
+```
 });
 ```
 

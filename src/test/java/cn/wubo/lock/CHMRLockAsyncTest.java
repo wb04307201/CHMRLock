@@ -14,11 +14,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class CHMRLockAsyncTest {
 
     @Test
-    void tryAcquireAsyncBooleanSucceeds() throws Exception {
+    void tryAcquireAsyncWithTimeoutSucceeds() throws Exception {
         try (CHMRLock lock = new CHMRLock()) {
-            CompletableFuture<Boolean> future = lock.tryAcquireAsync("k1", 1, TimeUnit.SECONDS);
-            Boolean acquired = future.get(2, TimeUnit.SECONDS);
-            assertTrue(acquired);
+            CompletableFuture<Optional<AcquiredLock>> future = lock.tryAcquireAsync("k1", 1, TimeUnit.SECONDS);
+            Optional<AcquiredLock> acquired = future.get(2, TimeUnit.SECONDS);
+            assertTrue(acquired.isPresent());
             // Lock is held by the async thread; CHMRLock-level isLocked reports true
             assertTrue(lock.isLocked("k1"));
             // Cleanup handled by the manager's close() which calls lockMap.clear().
@@ -26,14 +26,14 @@ class CHMRLockAsyncTest {
     }
 
     @Test
-    void tryAcquireAsyncBooleanReturnsFalseOnTimeout() throws Exception {
+    void tryAcquireAsyncWithTimeoutReturnsEmptyOnTimeout() throws Exception {
         try (CHMRLock lock = new CHMRLock()) {
             // Hold k1 in this thread
             assertTrue(lock.tryLock("k1"));
             // Async try to acquire k1 with short timeout
-            CompletableFuture<Boolean> future = lock.tryAcquireAsync("k1", 50, TimeUnit.MILLISECONDS);
-            Boolean acquired = future.get(2, TimeUnit.SECONDS);
-            assertFalse(acquired);
+            CompletableFuture<Optional<AcquiredLock>> future = lock.tryAcquireAsync("k1", 50, TimeUnit.MILLISECONDS);
+            Optional<AcquiredLock> acquired = future.get(2, TimeUnit.SECONDS);
+            assertFalse(acquired.isPresent());
             lock.unlock("k1");
         }
     }
@@ -95,8 +95,8 @@ class CHMRLockAsyncTest {
                 .forceUnlockEnabled(true)
                 .build();
         CHMRLock lock = new CHMRLock(config);
-        CompletableFuture<Boolean> f1 = lock.tryAcquireAsync("k1", 1, TimeUnit.SECONDS);
-        assertTrue(f1.get(2, TimeUnit.SECONDS));
+        CompletableFuture<Optional<AcquiredLock>> f1 = lock.tryAcquireAsync("k1", 1, TimeUnit.SECONDS);
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isPresent());
         // Close should also shutdown the async executor
         lock.shutdown();
         // After shutdown, new async tasks should be rejected.
@@ -104,7 +104,7 @@ class CHMRLockAsyncTest {
         // ExecutorService; the supplier may also complete the future exceptionally.
         // We accept either form (synchronous throw or completed-exceptionally future).
         try {
-            CompletableFuture<Boolean> f2 = lock.tryAcquireAsync("k2", 1, TimeUnit.SECONDS);
+            CompletableFuture<Optional<AcquiredLock>> f2 = lock.tryAcquireAsync("k2", 1, TimeUnit.SECONDS);
             // If we got a future back, it must complete exceptionally.
             try {
                 f2.get(2, TimeUnit.SECONDS);

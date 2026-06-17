@@ -132,9 +132,19 @@ public class CHMRLock implements AutoCloseable {
             LockEntry le = entry.getValue();
             if (le.lock.isLocked()) return false;
             if (le.getLeaseEndTime() != Long.MAX_VALUE && le.getLeaseEndTime() < now) {
-                return false;  // 租约未到，保留（理论上不会出现这种情况）
+                return false;  // 租约未到,保留(理论上不会出现这种情况)
             }
-            return (now - le.getLastAcquireTime()) > threshold;
+            // 收窄竞态窗口:先用 tryLock(0) 原子地"借"一下锁,若能借到说明此刻无人持有,
+            // 然后立即释放借到的锁,最后再做空闲判断。
+            // 注意:这并不能完全消除竞态 —— 在 tryLock 与 removeIf 实际 remove 之间
+            // 另一个线程仍可能 start an acquisition;但窗口已大幅收窄,且即便发生
+            // 孤儿获取,后续 cleanup 周期或租约/forceUnlock 路径会清理。
+            if (!le.lock.tryLock()) return false;
+            try {
+                return (now - le.getLastAcquireTime()) > threshold;
+            } finally {
+                le.lock.unlock();
+            }
         });
     }
 
@@ -159,6 +169,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 是否成功获取
      */
     public boolean tryLock(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         return tryLock(key, defaultWaitTime, TimeUnit.MILLISECONDS);
     }
 
@@ -172,6 +183,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime, TimeUnit timeUnit) {
+        Objects.requireNonNull(key, "key must not be null");
         return tryLock(key, waitTime, 0, timeUnit);
     }
 
@@ -188,32 +200,34 @@ public class CHMRLock implements AutoCloseable {
      * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
+        Objects.requireNonNull(key, "key must not be null");
         long startTime = config.clock().millis();
         long startNanos = System.nanoTime();
         totalLocks.incrementAndGet();
         boolean perKeyMetrics = config.enablePerKeyMetrics();
 
-        // maxKeys 限制：仅对"新 key"（不在 map 中）生效，已存在的 key 可重入
-        // 计数维度：仅统计当前"持有中"的 entry（isLocked == true），
-        // 释放后的 entry 不占 slot，否则 unlock → tryLock 新 key 的常见模式会被阻塞
-        if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
-            if (countHeldEntries() >= config.maxKeys()) {
-                failedLocks.incrementAndGet();
-                long elapsedMillis = config.clock().millis() - startTime;
-                totalWaitTime.addAndGet(elapsedMillis);
-                if (perKeyMetrics) {
-                    LockEntry existing = lockMap.get(key);
-                    if (existing != null) {
-                        existing.recordAcquireAttempt();
-                        existing.recordAcquireFailure(System.nanoTime() - startNanos);
-                    }
-                }
-                fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
-                return false;
-            }
-        }
+        // 记录 key 是否已存在于 map 中(用于 maxKeys 限制的"新 key"判断)
+        boolean wasNew = !lockMap.containsKey(key);
 
+        // 先创建 entry,后续 per-key metrics 可以记录在刚创建的 entry 上
+        // (无论是否最终被 maxKeys 拒绝)。同时已存在的 key 可重入。
         LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry(config.fairLock()));
+
+        // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入;
+        // 同时要求该 key 当前未被持有(否则是同线程 reentry,不应被拒绝)。
+        if (config.maxKeys() > 0 && wasNew && countHeldEntries() >= config.maxKeys()) {
+            failedLocks.incrementAndGet();
+            long elapsedMillis = config.clock().millis() - startTime;
+            totalWaitTime.addAndGet(elapsedMillis);
+            if (perKeyMetrics) {
+                lockEntry.recordAcquireAttempt();
+                lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
+            }
+            // 被拒绝的 key 不应在 lockMap 中残留(以免 getActiveKeys 把已拒绝的 key 算进去)
+            lockMap.remove(key, lockEntry);
+            fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
+            return false;
+        }
 
         if (perKeyMetrics) {
             lockEntry.recordAcquireAttempt();
@@ -273,16 +287,18 @@ public class CHMRLock implements AutoCloseable {
                 if (!entry.lock.isLocked()) {
                     return;  // 已被主动释放
                 }
-                // 租约到期。ReentrantLock 不支持跨线程 unlock（会抛 IllegalMonitorStateException），
-                // 因此这里仅清理租约状态和 owner，isLocked 即正确报告锁已过期。
+                // 租约到期。ReentrantLock 不支持跨线程 unlock(会抛 IllegalMonitorStateException),
+                // 因此这里尝试解锁后必须通过 forceUnlock 哨兵让 isLocked 报告已释放。
                 try {
                     entry.lock.unlock();
                 } catch (IllegalMonitorStateException ignored) {
-                    // 跨线程 unlock 失败，仅清理租约状态
+                    // 跨线程 unlock 失败,仅通过哨兵清理 CHMRLock 状态
                 }
-                entry.clearOwner();
-                entry.clearLease();
-                // 租约已到期，通知监听器（无论底层 ReentrantLock 是否真正释放）
+                // 哨兵置位:isLocked 据此返回 false,owner/lease 也被清空。
+                // 后续由原持有线程调用 unlock(key) 时,C-4 修复会让 unlock 走哨兵感知路径,
+                // 跳过底层 lock.unlock() 并清除哨兵。
+                entry.markForceUnlocked();
+                // 租约已到期,通知监听器(无论底层 ReentrantLock 是否真正释放)
                 fireExpired(key);
             }
         }, delayMillis, TimeUnit.MILLISECONDS);
@@ -297,6 +313,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime){
+        Objects.requireNonNull(key, "key must not be null");
         return tryLock(key, waitTime, TimeUnit.MILLISECONDS);
     }
 
@@ -308,6 +325,7 @@ public class CHMRLock implements AutoCloseable {
      * @throws InterruptedException 等待获取过程中线程被中断
      */
     public void lock(String key) throws InterruptedException {
+        Objects.requireNonNull(key, "key must not be null");
         lock(key, 0, TimeUnit.MILLISECONDS);
     }
 
@@ -323,29 +341,32 @@ public class CHMRLock implements AutoCloseable {
      * @throws IllegalStateException 当 {@code maxKeys} 限制被触发时
      */
     public void lock(String key, long leaseTime, TimeUnit timeUnit) throws InterruptedException {
+        Objects.requireNonNull(key, "key must not be null");
         long startTime = config.clock().millis();
         long startNanos = System.nanoTime();
         totalLocks.incrementAndGet();
         boolean perKeyMetrics = config.enablePerKeyMetrics();
 
-        // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入
-        if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
-            if (countHeldEntries() >= config.maxKeys()) {
-                failedLocks.incrementAndGet();
-                totalWaitTime.addAndGet(config.clock().millis() - startTime);
-                if (perKeyMetrics) {
-                    LockEntry existing = lockMap.get(key);
-                    if (existing != null) {
-                        existing.recordAcquireAttempt();
-                        existing.recordAcquireFailure(System.nanoTime() - startNanos);
-                    }
-                }
-                fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
-                throw new IllegalStateException("maxKeys limit reached: " + config.maxKeys());
-            }
-        }
+        // 记录 key 是否已存在于 map 中(用于 maxKeys 限制的"新 key"判断)
+        boolean wasNew = !lockMap.containsKey(key);
 
+        // 先创建 entry,后续 per-key metrics 可以记录在刚创建的 entry 上
         LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry(config.fairLock()));
+
+        // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入;
+        // 同时要求该 key 当前未被持有(否则是同线程 reentry,不应被拒绝)。
+        if (config.maxKeys() > 0 && wasNew && countHeldEntries() >= config.maxKeys()) {
+            failedLocks.incrementAndGet();
+            totalWaitTime.addAndGet(config.clock().millis() - startTime);
+            if (perKeyMetrics) {
+                lockEntry.recordAcquireAttempt();
+                lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
+            }
+            // 被拒绝的 key 不应在 lockMap 中残留
+            lockMap.remove(key, lockEntry);
+            fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
+            throw new IllegalStateException("maxKeys limit reached: " + config.maxKeys());
+        }
 
         if (perKeyMetrics) {
             lockEntry.recordAcquireAttempt();
@@ -397,6 +418,7 @@ public class CHMRLock implements AutoCloseable {
      * @throws IllegalStateException 当 {@code maxKeys} 限制被触发时
      */
     public void lockInterruptibly(String key, long leaseTime, TimeUnit timeUnit) throws InterruptedException {
+        Objects.requireNonNull(key, "key must not be null");
         lock(key, leaseTime, timeUnit);
     }
 
@@ -411,6 +433,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 成功时返回包含 {@link AcquiredLock} 的 Optional,失败或被当前线程持有时返回空
      */
     public Optional<AcquiredLock> tryAcquire(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         return tryAcquire(key, defaultWaitTime, 0, TimeUnit.MILLISECONDS);
     }
 
@@ -428,6 +451,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 成功则返回包含 {@link AcquiredLock} 的 Optional,否则空
      */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, TimeUnit timeUnit) {
+        Objects.requireNonNull(key, "key must not be null");
         return tryAcquire(key, waitTime, 0, timeUnit);
     }
 
@@ -445,6 +469,11 @@ public class CHMRLock implements AutoCloseable {
      * @return 成功则返回包含 {@link AcquiredLock} 的 Optional,否则空
      */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
+        Objects.requireNonNull(key, "key must not be null");
+        // 非可重入 fast-fail:本次快速失败会在全局 failedLocks 计数中加 1,
+        // (因为我们还没进 tryLock,也就没有 per-key 记录——全局统计会反映这次尝试)。
+        // 注意:isHeldByCurrentThread 与 tryLock 之间存在 TOCTOU 窗口 —
+        // 同线程的 unlock 可能在两次读取之间发生,这种情况下本次调用会真正获取锁。
         if (isHeldByCurrentThread(key)) {
             return Optional.empty();
         }
@@ -452,23 +481,6 @@ public class CHMRLock implements AutoCloseable {
             return Optional.of(new AcquiredLock(this, key));
         }
         return Optional.empty();
-    }
-
-    /**
-     * 异步获取锁,带超时。底层使用独立线程池,不会阻塞调用线程。
-     *
-     * <p>底层由专用守护线程池执行,不会阻塞调用线程。线程命名格式为 {@code chmrlock-async-N}。</p>
-     * <p><b>注意:</b>取消返回的 future 不会中断底层加锁;若加锁成功,锁仍由异步线程持有,
-     *    必须通过 {@link #unlock(String)} 或 {@link #forceUnlock(String)} 释放。</p>
-     * <p>在 {@link #shutdown()} 之后调用可能立即抛出 {@link RejectedExecutionException}。</p>
-     *
-     * @param key 锁标识
-     * @param waitTime 等待获取的最长时间
-     * @param timeUnit 时间单位
-     * @return CompletableFuture&lt;Boolean&gt;: true=获取成功,false=超时
-     */
-    public CompletableFuture<Boolean> tryAcquireAsync(String key, long waitTime, TimeUnit timeUnit) {
-        return CompletableFuture.supplyAsync(() -> tryLock(key, waitTime, timeUnit), asyncExecutor);
     }
 
     /**
@@ -488,7 +500,31 @@ public class CHMRLock implements AutoCloseable {
      * @return CompletableFuture&lt;Optional&lt;AcquiredLock&gt;&gt;: 成功时 Optional 非空,否则空
      */
     public CompletableFuture<Optional<AcquiredLock>> tryAcquireAsync(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         return CompletableFuture.supplyAsync(() -> tryAcquire(key), asyncExecutor);
+    }
+
+    /**
+     * 异步获取锁并返回 {@link AcquiredLock} 包装,带超时。底层使用独立线程池,不会阻塞调用线程。
+     * 语义与 {@link #tryAcquire(String, long, TimeUnit)} 一致
+     * (非可重入:若当前线程已持有 key,返回 {@code Optional.empty()})。
+     *
+     * <p>底层由专用守护线程池执行,不会阻塞调用线程。线程命名格式为 {@code chmrlock-async-N}。</p>
+     * <p>返回的 {@link AcquiredLock} 的持有线程为执行加锁的异步线程 ——
+     *    若从调用线程调用 {@code close()},由于 ReentrantLock 不允许跨线程释放,
+     *    实际不会释放锁(异常会被吞掉)。</p>
+     * <p><b>注意:</b>取消返回的 future 不会中断底层加锁;若加锁成功,锁仍由异步线程持有,
+     *    必须通过 {@link #unlock(String)} 或 {@link #forceUnlock(String)} 释放。</p>
+     * <p>在 {@link #shutdown()} 之后调用可能立即抛出 {@link RejectedExecutionException}。</p>
+     *
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param timeUnit 时间单位
+     * @return CompletableFuture&lt;Optional&lt;AcquiredLock&gt;&gt;: 成功时 Optional 非空,否则空
+     */
+    public CompletableFuture<Optional<AcquiredLock>> tryAcquireAsync(String key, long waitTime, TimeUnit timeUnit) {
+        Objects.requireNonNull(key, "key must not be null");
+        return CompletableFuture.supplyAsync(() -> tryAcquire(key, waitTime, timeUnit), asyncExecutor);
     }
 
     /**
@@ -521,11 +557,12 @@ public class CHMRLock implements AutoCloseable {
      * 排序与去重:keys 按字典序排序以避免多线程按不同顺序加锁导致的死锁;
      * 重复 key 仅加锁一次。
      *
-     * <p>每个 key 的等待时间随已用时间递减;为了避免最后一把锁的预算被截断为 0,
-     * 每个 key 至少获得 1ms 等待时间(可能略微超出用户指定的 {@code waitTime})。</p>
+     * <p>每个 key 的等待时间按公平份额分配(单 key 预算 = 总预算 / N),
+     * 同时受剩余时间约束,确保总等待时间不会显著超出用户指定的 {@code waitTime}
+     * (最坏情况为 {@code waitTime + 1ms},仅最后一把锁的 1ms 下限导致)。</p>
      *
      * @param waitTime 单个 key 的最大等待时间
-     * @param leaseTime 租约时间,0 表示无租约
+     * @param leaseTime 租约时间(以 {@code timeUnit} 为单位),0 表示无租约
      * @param timeUnit 时间单位
      * @param keys 要获取的 key 列表
      * @return 是否全部成功
@@ -542,15 +579,26 @@ public class CHMRLock implements AutoCloseable {
         long startNanos = System.nanoTime();
         long totalNanos = timeUnit.toNanos(waitTime);
 
+        // Pre-compute a fair per-key budget so the cumulative wait stays bounded by
+        // waitTime. The last key may still get a 1ms floor (Math.max(1, ...)), so the
+        // worst-case total is waitTime + 1ms instead of waitTime + N-1 ms.
+        int n = unique.length;
+        long perKeyBudgetNanos = totalNanos / n;
+
+        // leaseTime 已经在 timeUnit 中,先转成毫秒
+        long leaseMillis = timeUnit.toMillis(leaseTime);
+
         for (String key : unique) {
-            long remainingNanos = totalNanos - (System.nanoTime() - startNanos);
+            long elapsedNanos = System.nanoTime() - startNanos;
+            long remainingNanos = totalNanos - elapsedNanos;
             if (remainingNanos <= 0) {
                 rollback(acquired);
                 return false;
             }
-            // Convert remaining nanos to millis for tryLock; ensure at least 1ms to give a chance.
-            long remainingMillis = Math.max(1, remainingNanos / 1_000_000);
-            if (!tryLock(key, remainingMillis, leaseTime, TimeUnit.MILLISECONDS)) {
+            // 给每个 key 一个公平的预算份额,最后再用剩余时间作上限
+            long budgetNanos = Math.min(perKeyBudgetNanos, remainingNanos);
+            long budgetMillis = Math.max(1, budgetNanos / 1_000_000);
+            if (!tryLock(key, budgetMillis, leaseMillis, TimeUnit.MILLISECONDS)) {
                 rollback(acquired);
                 return false;
             }
@@ -576,20 +624,53 @@ public class CHMRLock implements AutoCloseable {
     /**
      * 释放锁。key 必须已经通过 tryLock 成功获取。
      *
-     * <p><b>注意:</b>如果该 key 曾被 {@link #forceUnlock(String)} 强制释放,
-     * 底层 ReentrantLock 可能仍由本线程持有 — 此 unlock 会成功释放 AQS 状态
-     * 并触发 {@link LockListener#onLockReleased} 事件,但 CHMRLock 视角下
-     * 锁已被释放。建议在 unlock 前调用 {@link #isLocked(String)} 确认状态。</p>
+     * <p><b>哨兵感知路径:</b>如果该 key 曾被 {@link #forceUnlock(String)} 强制释放,
+     * 或租约到期后由后台线程清理,底层 ReentrantLock 可能已不再由本线程持有 —
+     * 此时 unlock 会先检查 forceUnlock 哨兵:若哨兵已置位,跳过底层 {@code lock.unlock()}
+     * (避免抛 {@link IllegalMonitorStateException}),清除哨兵和 owner/lease,并
+     * 触发 {@link LockListener#onLockReleased} 事件。</p>
+     *
+     * <p>若哨兵未置位但底层 lock.unlock() 仍抛 {@link IllegalMonitorStateException}
+     * (例如另一个线程刚调用了 forceUnlock),本方法会再次检查哨兵并按哨兵路径处理;
+     * 仅当哨兵确实未置位时才重新抛出异常,标记为跨线程 unlock。</p>
      *
      * @throws LockNotFoundException key 从未加锁
-     * @throws IllegalMonitorStateException 锁未被当前线程持有（跨线程 unlock）
+     * @throws IllegalMonitorStateException 锁未被当前线程持有(跨线程 unlock)
      */
     public void unlock(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         LockEntry lockEntry = lockMap.get(key);
         if (lockEntry == null) {
             throw new LockNotFoundException(key);
         }
-        lockEntry.lock.unlock();
+        // 哨兵已置位:跳过底层 unlock,清理状态
+        if (lockEntry.isForceUnlocked()) {
+            lockEntry.clearForceUnlocked();
+            lockEntry.clearOwner();
+            lockEntry.clearLease();
+            if (config.enablePerKeyMetrics()) {
+                lockEntry.recordRelease(config.clock().millis());
+            }
+            fireReleased(key, config.clock().millis() - lockEntry.getLastAcquireTime());
+            return;
+        }
+        try {
+            lockEntry.lock.unlock();
+        } catch (IllegalMonitorStateException e) {
+            // 竞态:在哨兵检查与 unlock 之间另一个线程调用了 forceUnlock。
+            // 重新检查哨兵,若已置位则按哨兵路径处理。
+            if (lockEntry.isForceUnlocked()) {
+                lockEntry.clearForceUnlocked();
+                lockEntry.clearOwner();
+                lockEntry.clearLease();
+                if (config.enablePerKeyMetrics()) {
+                    lockEntry.recordRelease(config.clock().millis());
+                }
+                fireReleased(key, config.clock().millis() - lockEntry.getLastAcquireTime());
+                return;
+            }
+            throw e;  // 真正的跨线程 unlock
+        }
         lockEntry.clearOwner();
         lockEntry.clearLease();
         if (config.enablePerKeyMetrics()) {
@@ -619,6 +700,7 @@ public class CHMRLock implements AutoCloseable {
      * @throws UnsupportedOperationException 若 {@code config.forceUnlockEnabled()} 为 false
      */
     public void forceUnlock(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         if (!config.forceUnlockEnabled()) {
             throw new UnsupportedOperationException(
                     "forceUnlock is not enabled. Set CHMRLockConfig.forceUnlockEnabled(true) to enable.");
@@ -648,6 +730,7 @@ public class CHMRLock implements AutoCloseable {
      * 调用 {@link #forceUnlock(String)} 后此方法同样返回 false。
      */
     public boolean isLocked(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         LockEntry e = lockMap.get(key);
         if (e == null) return false;
         // forceUnlock 已置位：从 CHMRLock 视角看已释放
@@ -665,6 +748,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 当前线程是否持有该 key；key 不存在返回 false
      */
     public boolean isHeldByCurrentThread(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         LockEntry e = lockMap.get(key);
         return e != null && e.lock.isHeldByCurrentThread();
     }
@@ -674,6 +758,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 当前线程对该 key 的重入深度；key 不存在返回 0
      */
     public int getHoldCount(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         LockEntry e = lockMap.get(key);
         return e == null ? 0 : e.lock.getHoldCount();
     }
@@ -683,6 +768,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 当前持有该 key 的线程 id；key 不存在或未被持有返回 {@code null}
      */
     public Long getOwnerThreadId(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         LockEntry e = lockMap.get(key);
         return e == null ? null : e.getOwnerThreadId();
     }
@@ -722,6 +808,7 @@ public class CHMRLock implements AutoCloseable {
      * @see KeyedReadWriteLock
      */
     public KeyedReadWriteLock readWriteLock(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         return rwLockMap.computeIfAbsent(key, k -> new StampedKeyedReadWriteLock());
     }
 
@@ -733,10 +820,12 @@ public class CHMRLock implements AutoCloseable {
         if (listener != null) listeners.add(listener);
     }
 
-    /** 注销一个监听器。{@code null} 被忽略；注销未注册的实例是 no-op。 */
+    /** 注销一个监听器。{@code null} 被忽略;注销未注册的实例是 no-op。
+     *  <p>基于引用相等(==)进行匹配,便于"可重复注册同一个实例"的精确注销。
+     *  若希望按 equals 匹配,请在自定义 LockListener 中确保实现恰当的 equals。</p> */
     public void unregisterListener(LockListener listener) {
         if (listener == null) return;
-        listeners.remove(listener);
+        listeners.removeIf(l -> l == listener);
     }
 
     /**
@@ -763,10 +852,12 @@ public class CHMRLock implements AutoCloseable {
      *
      * @param name 逻辑名称
      * @return 对应的分布式锁;若未注册则为空 {@link Optional}
+     * @throws NullPointerException 当 {@code name} 为 null
      * @see #registerDistributedLock(String, DistributedLock)
      * @since 2.0.0
      */
     public Optional<DistributedLock> getDistributedLock(String name) {
+        Objects.requireNonNull(name, "name must not be null");
         return Optional.ofNullable(distributedLocks.get(name));
     }
 
@@ -775,10 +866,12 @@ public class CHMRLock implements AutoCloseable {
      *
      * @param name 逻辑名称
      * @return 是否成功移除(若 name 未注册则返回 false)
+     * @throws NullPointerException 当 {@code name} 为 null
      * @see #registerDistributedLock(String, DistributedLock)
      * @since 2.0.0
      */
     public boolean unregisterDistributedLock(String name) {
+        Objects.requireNonNull(name, "name must not be null");
         return distributedLocks.remove(name) != null;
     }
 
@@ -864,6 +957,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 指标快照；若 metrics 未启用或 key 从未加锁，返回 {@link Optional#empty()}
      */
     public Optional<KeyStatistics> getStatistics(String key) {
+        Objects.requireNonNull(key, "key must not be null");
         if (!config.enablePerKeyMetrics()) return Optional.empty();
         LockEntry e = lockMap.get(key);
         if (e == null) return Optional.empty();
