@@ -424,6 +424,12 @@ public class CHMRLock implements AutoCloseable {
 
     /**
      * 释放锁。key 必须已经通过 tryLock 成功获取。
+     *
+     * <p><b>注意:</b>如果该 key 曾被 {@link #forceUnlock(String)} 强制释放,
+     * 底层 ReentrantLock 可能仍由本线程持有 — 此 unlock 会成功释放 AQS 状态
+     * 并触发 {@link LockListener#onLockReleased} 事件,但 CHMRLock 视角下
+     * 锁已被释放。建议在 unlock 前调用 {@link #isLocked(String)} 确认状态。</p>
+     *
      * @throws LockNotFoundException key 从未加锁
      * @throws IllegalMonitorStateException 锁未被当前线程持有（跨线程 unlock）
      */

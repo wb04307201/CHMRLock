@@ -92,4 +92,20 @@ class CHMRLockForceUnlockTest {
                     "Owner should be cleared after forceUnlock from other thread");
         }
     }
+
+    @Test
+    void tryLockAfterForceUnlockSucceeds() {
+        CHMRLockConfig cfg = CHMRLockConfig.builder()
+                .forceUnlockEnabled(true)
+                .build();
+        try (CHMRLock lock = new CHMRLock(cfg)) {
+            assertTrue(lock.tryLock("k1"));
+            lock.forceUnlock("k1");
+            assertFalse(lock.isLocked("k1"));
+            // Re-acquire should succeed
+            assertTrue(lock.tryLock("k1"),
+                    "tryLock should succeed after forceUnlock cleared the sentinel");
+            assertTrue(lock.isLocked("k1"));
+        }
+    }
 }
