@@ -150,6 +150,24 @@ public class CHMRLock implements AutoCloseable {
         return tryLock(key, waitTime, TimeUnit.MILLISECONDS);
     }
 
+    public Optional<AcquiredLock> tryAcquire(String key) {
+        return tryAcquire(key, defaultWaitTime, 0, TimeUnit.MILLISECONDS);
+    }
+
+    public Optional<AcquiredLock> tryAcquire(String key, long waitTime, TimeUnit timeUnit) {
+        return tryAcquire(key, waitTime, 0, timeUnit);
+    }
+
+    public Optional<AcquiredLock> tryAcquire(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
+        if (isHeldByCurrentThread(key)) {
+            return Optional.empty();
+        }
+        if (tryLock(key, waitTime, leaseTime, timeUnit)) {
+            return Optional.of(new AcquiredLock(this, key));
+        }
+        return Optional.empty();
+    }
+
     /**
      * 释放锁。key 必须已经通过 tryLock 成功获取。
      * @throws LockNotFoundException key 从未加锁
