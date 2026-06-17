@@ -138,6 +138,10 @@ public class CHMRLock implements AutoCloseable {
         return e == null ? 0 : e.lock.getHoldCount();
     }
 
+    public Set<String> getActiveKeys() {
+        return Collections.unmodifiableSet(lockMap.keySet());
+    }
+
     public void shutdown() {
         if (shutdownCalled.compareAndSet(false, true)) {
             lockMap.clear();

@@ -3,6 +3,7 @@ package cn.wubo.lock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -61,5 +62,27 @@ class CHMRLockQueryTest {
     @Test
     void getHoldCountZeroForUnknownKey() {
         assertEquals(0, lock.getHoldCount("nope"));
+    }
+
+    @Test
+    void getActiveKeysEmptyInitially() {
+        assertTrue(lock.getActiveKeys().isEmpty());
+    }
+
+    @Test
+    void getActiveKeysContainsHeld() {
+        lock.tryLock("a");
+        lock.tryLock("b");
+        Set<String> keys = lock.getActiveKeys();
+        assertEquals(2, keys.size());
+        assertTrue(keys.contains("a"));
+        assertTrue(keys.contains("b"));
+    }
+
+    @Test
+    void getActiveKeysIsImmutable() {
+        lock.tryLock("a");
+        Set<String> keys = lock.getActiveKeys();
+        assertThrows(UnsupportedOperationException.class, () -> keys.add("b"));
     }
 }
