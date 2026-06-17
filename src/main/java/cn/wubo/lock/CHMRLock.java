@@ -51,6 +51,9 @@ public class CHMRLock implements AutoCloseable {
     // 存储各个key对应的锁
     private final Map<String, LockEntry> lockMap = new ConcurrentHashMap<>();
 
+    // Per-key StampedLock cache for read-write scenarios
+    private final ConcurrentHashMap<String, StampedKeyedReadWriteLock> rwLockMap = new ConcurrentHashMap<>();
+
     // 统计信息
     private final AtomicLong totalLocks = new AtomicLong(0);
     private final AtomicLong successLocks = new AtomicLong(0);
@@ -543,6 +546,31 @@ public class CHMRLock implements AutoCloseable {
      */
     public Set<String> getActiveKeys() {
         return Collections.unmodifiableSet(lockMap.keySet());
+    }
+
+    /**
+     * 获取指定 key 的读写锁。与 tryLock/unlock 互不干扰 — 读写锁是独立的锁实例。
+     * 同一 key 多次调用返回同一实例。
+     *
+     * <p><b>非可重入:</b>底层基于 {@link java.util.concurrent.locks.StampedLock},
+     * 不支持重入;同一线程连续获取读/写锁会死锁。</p>
+     *
+     * <p>典型用法:</p>
+     * <pre>{@code
+     * KeyedReadWriteLock rw = lock.readWriteLock("resource");
+     * long stamp = rw.readLock();
+     * try {
+     *     // 读取共享数据
+     * } finally {
+     *     rw.unlockRead(stamp);
+     * }
+     * }</pre>
+     *
+     * @param key 锁标识
+     * @return 该 key 对应的读写锁实例(同一 key 共享)
+     */
+    public KeyedReadWriteLock readWriteLock(String key) {
+        return rwLockMap.computeIfAbsent(key, k -> new StampedKeyedReadWriteLock());
     }
 
     /**
