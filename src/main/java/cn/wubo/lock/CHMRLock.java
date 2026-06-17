@@ -2,6 +2,7 @@ package cn.wubo.lock;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -28,10 +29,19 @@ public class CHMRLock {
 
     public CHMRLock(long defaultWaitTime, TimeUnit timeUnit) {
         this.defaultWaitTime = timeUnit.toMillis(defaultWaitTime);
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor();
+        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory());
 
         // 启动后台清理线程
         startCleanupThread();
+    }
+
+    private static ThreadFactory daemonThreadFactory() {
+        AtomicInteger seq = new AtomicInteger(1);
+        return r -> {
+            Thread t = new Thread(r, "chmrlock-cleanup-" + seq.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     /**
