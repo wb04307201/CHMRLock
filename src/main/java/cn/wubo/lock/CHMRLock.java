@@ -333,6 +333,11 @@ public class CHMRLock implements AutoCloseable {
             lockEntry.recordAcquireAttempt();
         }
 
+        // Fire contended event if held by a different thread (mirrors tryLock semantics)
+        if (lockEntry.lock.isLocked() && !lockEntry.lock.isHeldByCurrentThread()) {
+            fireContended(key);
+        }
+
         try {
             lockEntry.lock.lockInterruptibly();
             successLocks.incrementAndGet();
