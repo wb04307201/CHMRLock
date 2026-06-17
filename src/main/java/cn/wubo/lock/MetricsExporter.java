@@ -10,7 +10,9 @@ import java.util.Map;
  */
 public interface MetricsExporter {
     /**
-     * 导出指标快照。
+     * 导出指标快照。实现类应保证调用本方法为轻量操作(只读快照),
+     * 不得修改传入的 {@code global} 或 {@code perKey}。
+     *
      * @param global 全局统计指标
      * @param perKey 各 key 的统计指标(可为空;表示 metrics 未启用)
      */

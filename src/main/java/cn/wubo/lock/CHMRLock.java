@@ -149,7 +149,9 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 尝试获取指定 key 的锁，等待最多 {@code defaultWaitTime}（默认 3 秒）。
+     * 尝试获取指定 key 的锁,等待最多 {@link CHMRLockConfig#defaultWaitTime()}(默认 3 秒)。
+     * 便捷重载,等价于 {@link #tryLock(String, long, TimeUnit) tryLock(key, defaultWaitTime, MILLISECONDS)}。
+     *
      * @param key 锁标识
      * @return 是否成功获取
      */
@@ -158,7 +160,9 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 尝试获取指定 key 的锁，等待最多 {@code waitTime}。
+     * 尝试获取指定 key 的锁,等待最多 {@code waitTime}。无租约,等价于
+     * {@link #tryLock(String, long, long, TimeUnit) tryLock(key, waitTime, 0, timeUnit)}。
+     *
      * @param key 锁标识
      * @param waitTime 等待获取的最长时间
      * @param timeUnit 时间单位
@@ -282,9 +286,11 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 尝试获取指定 key 的锁，等待最多 {@code waitTime} 毫秒。
+     * 尝试获取指定 key 的锁,等待最多 {@code waitTime} 毫秒。
+     * 便捷重载,等价于 {@link #tryLock(String, long, TimeUnit) tryLock(key, waitTime, TimeUnit.MILLISECONDS)}。
+     *
      * @param key 锁标识
-     * @param waitTime 等待获取的最长时间（毫秒）
+     * @param waitTime 等待获取的最长时间(毫秒)
      * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime){
@@ -392,32 +398,48 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
-     * 非可重入版本的 tryLock，返回 AcquiredLock 以支持 try-with-resources。
-     * 与 tryLock 不同：若当前线程已持有 key，返回 Optional.empty()。
+     * 非可重入版本的 {@link #tryLock(String)},返回 {@link AcquiredLock} 以支持 try-with-resources。
+     *
+     * <p><b>非可重入语义:</b>与 {@code tryLock} 不同,若当前线程已持有 key,
+     * 返回 {@link Optional#empty()} 而非成功。这保证了 {@link AcquiredLock} 包装
+     * 与底层锁获取是 1:1 对应,避免 try-with-resources 重复释放。</p>
+     *
      * @param key 锁标识
-     * @return 成功时返回包含 AcquiredLock 的 Optional，失败返回空
+     * @return 成功时返回包含 {@link AcquiredLock} 的 Optional,失败或被当前线程持有时返回空
      */
     public Optional<AcquiredLock> tryAcquire(String key) {
         return tryAcquire(key, defaultWaitTime, 0, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * 获取锁并返回 AcquiredLock 包装，支持 try-with-resources。
-     * 与 tryLock 不同，tryAcquire 是非可重入的：如果当前线程已经持有 key，
-     * 返回 Optional.empty()。这保证了 AcquiredLock 包装与底层锁获取是 1:1 对应。
+     * 获取锁并返回 {@link AcquiredLock} 包装,支持 try-with-resources;等待最多 {@code waitTime}。
+     *
+     * <p><b>非可重入语义:</b>与 {@link #tryLock(String, long, TimeUnit) tryLock} 不同,
+     * 若当前线程已持有 key,直接返回 {@link Optional#empty()} (不等待)。
+     * 这保证 {@link AcquiredLock} 包装与底层锁获取是 1:1 对应,
+     * 避免 try-with-resources 重复释放。详细语义见 {@link #tryAcquire(String)}。</p>
      *
      * @param key 锁标识
      * @param waitTime 等待获取的最长时间
      * @param timeUnit 时间单位
-     * @return 成功则返回包含 AcquiredLock 的 Optional，否则空
+     * @return 成功则返回包含 {@link AcquiredLock} 的 Optional,否则空
      */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, TimeUnit timeUnit) {
         return tryAcquire(key, waitTime, 0, timeUnit);
     }
 
     /**
-     * 获取锁并返回 AcquiredLock 包装，支持 try-with-resources，可指定租约。
-     * 与 tryLock 不同，tryAcquire 是非可重入的：如果当前线程已经持有 key，返回 Optional.empty()。
+     * 获取锁并返回 {@link AcquiredLock} 包装,支持 try-with-resources,可指定租约。
+     *
+     * <p><b>非可重入语义:</b>与 {@link #tryLock(String, long, long, TimeUnit) tryLock} 不同,
+     * 若当前线程已持有 key,直接返回 {@link Optional#empty()} (不等待)。
+     * 这是 tryAcquire 的所有重载中唯一支持租约的入口。</p>
+     *
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param leaseTime 租约时长,0 表示无租约
+     * @param timeUnit 时间单位
+     * @return 成功则返回包含 {@link AcquiredLock} 的 Optional,否则空
      */
     public Optional<AcquiredLock> tryAcquire(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         if (isHeldByCurrentThread(key)) {
