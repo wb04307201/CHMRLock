@@ -37,7 +37,7 @@ public class MonitorMetrics {
         return totalLocks > 0 ? (double) successLocks / totalLocks : 0.0;
     }
 
-    public long getAvgWaitTime() {
-        return totalLocks > 0 ? totalWaitTime / totalLocks : 0;
+    public double getAvgWaitTime() {
+        return totalLocks > 0 ? (double) totalWaitTime / totalLocks : 0.0;
     }
 }
