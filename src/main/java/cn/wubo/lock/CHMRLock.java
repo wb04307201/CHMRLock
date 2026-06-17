@@ -69,6 +69,9 @@ public class CHMRLock implements AutoCloseable {
     // 锁生命周期监听器列表
     private final List<LockListener> listeners = new CopyOnWriteArrayList<>();
 
+    // 已注册的分布式锁 SPI 实例(按逻辑名称索引)
+    private final ConcurrentHashMap<String, DistributedLock> distributedLocks = new ConcurrentHashMap<>();
+
     private static final Logger log = Logger.getLogger(CHMRLock.class.getName());
     private final AtomicBoolean shutdownCalled = new AtomicBoolean(false);
 
@@ -736,6 +739,49 @@ public class CHMRLock implements AutoCloseable {
         listeners.remove(listener);
     }
 
+    /**
+     * 注册分布式锁实现,后续可通过 {@link #getDistributedLock(String)} 获取。
+     * 同一 name 重复注册会覆盖前一次注册。
+     * <p>CHMRLock 不会自动将本地 {@code tryLock} 路由到分布式锁 —— 用户需自行
+     * 通过 {@code getDistributedLock(name)} 取出后调用,以实现"按需走分布式"的语义。</p>
+     *
+     * @param name 逻辑名称(用户自定义,例如 {@code "tenantA"} / {@code "userId"})
+     * @param distributedLock 分布式锁实现,不可为 null
+     * @throws NullPointerException 当 {@code name} 或 {@code distributedLock} 为 null
+     * @see #getDistributedLock(String)
+     * @see #unregisterDistributedLock(String)
+     * @since 2.0.0
+     */
+    public void registerDistributedLock(String name, DistributedLock distributedLock) {
+        Objects.requireNonNull(name, "name must not be null");
+        Objects.requireNonNull(distributedLock, "distributedLock must not be null");
+        distributedLocks.put(name, distributedLock);
+    }
+
+    /**
+     * 获取已注册的分布式锁。
+     *
+     * @param name 逻辑名称
+     * @return 对应的分布式锁;若未注册则为空 {@link Optional}
+     * @see #registerDistributedLock(String, DistributedLock)
+     * @since 2.0.0
+     */
+    public Optional<DistributedLock> getDistributedLock(String name) {
+        return Optional.ofNullable(distributedLocks.get(name));
+    }
+
+    /**
+     * 注销分布式锁。
+     *
+     * @param name 逻辑名称
+     * @return 是否成功移除(若 name 未注册则返回 false)
+     * @see #registerDistributedLock(String, DistributedLock)
+     * @since 2.0.0
+     */
+    public boolean unregisterDistributedLock(String name) {
+        return distributedLocks.remove(name) != null;
+    }
+
     private void fireAcquired(String key, long waitNanos) {
         for (LockListener l : listeners) {
             try { l.onLockAcquired(key, waitNanos); } catch (Exception e) {
@@ -780,6 +826,7 @@ public class CHMRLock implements AutoCloseable {
     public void shutdown() {
         if (shutdownCalled.compareAndSet(false, true)) {
             lockMap.clear();
+            distributedLocks.clear();
             if (cleanupExecutor != null) {
                 cleanupExecutor.shutdown();
             }
