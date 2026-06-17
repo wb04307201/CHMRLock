@@ -60,6 +60,9 @@ public class CHMRLock implements AutoCloseable {
     // 清理线程池：用于定期执行清理任务
     private final ScheduledExecutorService cleanupExecutor;
 
+    // 锁生命周期监听器列表
+    private final List<LockListener> listeners = new CopyOnWriteArrayList<>();
+
     private static final Logger log = Logger.getLogger(CHMRLock.class.getName());
     private final AtomicBoolean shutdownCalled = new AtomicBoolean(false);
 
@@ -191,6 +194,7 @@ public class CHMRLock implements AutoCloseable {
                         existing.recordAcquireFailure(System.nanoTime() - startNanos);
                     }
                 }
+                fireFailed(key, System.nanoTime() - startNanos, "maxKeys");
                 return false;
             }
         }
@@ -199,6 +203,12 @@ public class CHMRLock implements AutoCloseable {
 
         if (perKeyMetrics) {
             lockEntry.recordAcquireAttempt();
+        }
+
+        // 非阻塞 tryLock(waitTime <= 0) 时，若 key 被另一个线程持有（即可重入以外的情况），
+        // 则触发 onLockContended 事件。同线程重入不会触发（不会阻塞）。
+        if (waitTime <= 0 && lockEntry.lock.isLocked() && !lockEntry.lock.isHeldByCurrentThread()) {
+            fireContended(key);
         }
 
         try {
@@ -215,12 +225,14 @@ public class CHMRLock implements AutoCloseable {
                     lockEntry.setLeaseEndTime(leaseEnd);
                     scheduleLeaseExpiry(key, leaseEnd);
                 }
+                fireAcquired(key, System.nanoTime() - startNanos);
                 return true;
             } else {
                 failedLocks.incrementAndGet();
                 if (perKeyMetrics) {
                     lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
                 }
+                fireFailed(key, System.nanoTime() - startNanos, "timeout");
                 return false;
             }
         } catch (InterruptedException e) {
@@ -229,6 +241,7 @@ public class CHMRLock implements AutoCloseable {
             if (perKeyMetrics) {
                 lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
             }
+            fireFailed(key, System.nanoTime() - startNanos, "interrupted");
             return false;
         } finally {
             totalWaitTime.addAndGet(config.clock().millis() - startTime);
@@ -244,14 +257,17 @@ public class CHMRLock implements AutoCloseable {
                 if (!entry.lock.isLocked()) {
                     return;  // 已被主动释放
                 }
-                // 强制释放
+                // 租约到期。ReentrantLock 不支持跨线程 unlock（会抛 IllegalMonitorStateException），
+                // 因此这里仅清理租约状态和 owner，isLocked 即正确报告锁已过期。
                 try {
                     entry.lock.unlock();
-                    entry.clearOwner();
-                    entry.clearLease();
                 } catch (IllegalMonitorStateException ignored) {
-                    // 已被释放
+                    // 跨线程 unlock 失败，仅清理租约状态
                 }
+                entry.clearOwner();
+                entry.clearLease();
+                // 租约已到期，通知监听器（无论底层 ReentrantLock 是否真正释放）
+                fireExpired(key);
             }
         }, delayMillis, TimeUnit.MILLISECONDS);
     }
@@ -320,6 +336,8 @@ public class CHMRLock implements AutoCloseable {
         if (config.enablePerKeyMetrics()) {
             lockEntry.recordRelease(config.clock().millis());
         }
+        long heldMillis = config.clock().millis() - lockEntry.getLastAcquireTime();
+        fireReleased(key, heldMillis);
     }
 
     /**
@@ -362,6 +380,62 @@ public class CHMRLock implements AutoCloseable {
      */
     public Set<String> getActiveKeys() {
         return Collections.unmodifiableSet(lockMap.keySet());
+    }
+
+    /**
+     * 注册一个锁生命周期监听器。可重复注册同一个实例，但通常不需要。
+     * @param listener 监听器实例（{@code null} 被忽略）
+     */
+    public void registerListener(LockListener listener) {
+        if (listener != null) listeners.add(listener);
+    }
+
+    /**
+     * 注销一个监听器。注销未注册的实例是 no-op。
+     * @param listener 要移除的监听器实例
+     */
+    public void unregisterListener(LockListener listener) {
+        listeners.remove(listener);
+    }
+
+    private void fireAcquired(String key, long waitNanos) {
+        for (LockListener l : listeners) {
+            try { l.onLockAcquired(key, waitNanos); } catch (Exception e) {
+                log.warning("LockListener.onLockAcquired threw: " + e);
+            }
+        }
+    }
+
+    private void fireReleased(String key, long heldMillis) {
+        for (LockListener l : listeners) {
+            try { l.onLockReleased(key, heldMillis); } catch (Exception e) {
+                log.warning("LockListener.onLockReleased threw: " + e);
+            }
+        }
+    }
+
+    private void fireFailed(String key, long waitNanos, String reason) {
+        for (LockListener l : listeners) {
+            try { l.onLockFailed(key, waitNanos, reason); } catch (Exception e) {
+                log.warning("LockListener.onLockFailed threw: " + e);
+            }
+        }
+    }
+
+    private void fireExpired(String key) {
+        for (LockListener l : listeners) {
+            try { l.onLockExpired(key); } catch (Exception e) {
+                log.warning("LockListener.onLockExpired threw: " + e);
+            }
+        }
+    }
+
+    private void fireContended(String key) {
+        for (LockListener l : listeners) {
+            try { l.onLockContended(key); } catch (Exception e) {
+                log.warning("LockListener.onLockContended threw: " + e);
+            }
+        }
     }
 
     /** 关闭锁管理器，停止清理线程并清空所有锁。幂等，可多次调用。 */
