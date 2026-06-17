@@ -2,11 +2,13 @@ package cn.wubo.lock;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Logger;
 
-public class CHMRLock {
+public class CHMRLock implements AutoCloseable {
     // 默认等待时间（毫秒）
     private long defaultWaitTime;
 
@@ -21,6 +23,9 @@ public class CHMRLock {
 
     // 清理线程池：用于定期执行清理任务
     private final ScheduledExecutorService cleanupExecutor;
+
+    private static final Logger log = Logger.getLogger(CHMRLock.class.getName());
+    private final AtomicBoolean shutdownCalled = new AtomicBoolean(false);
 
 
     public CHMRLock() {
@@ -117,10 +122,21 @@ public class CHMRLock {
     }
 
     public void shutdown() {
-        lockMap.clear();
-        if (cleanupExecutor != null) {
-            cleanupExecutor.shutdown();
+        if (shutdownCalled.compareAndSet(false, true)) {
+            lockMap.clear();
+            if (cleanupExecutor != null) {
+                cleanupExecutor.shutdown();
+            }
         }
+    }
+
+    public boolean isShutdown() {
+        return shutdownCalled.get();
+    }
+
+    @Override
+    public void close() {
+        shutdown();
     }
 
     public MonitorMetrics getStatistics() {
