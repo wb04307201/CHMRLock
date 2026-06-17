@@ -24,6 +24,9 @@ public record CHMRLockConfig(
         Objects.requireNonNull(clock, "clock");
         if (maxKeys < 0) throw new IllegalArgumentException("maxKeys 必须 >= 0");
         if (defaultWaitTime.isNegative()) throw new IllegalArgumentException("defaultWaitTime 不能为负");
+        if (defaultLeaseTime.isNegative()) throw new IllegalArgumentException("defaultLeaseTime 不能为负");
+        if (idleThreshold.isNegative()) throw new IllegalArgumentException("idleThreshold 不能为负");
+        if (cleanupInterval.isNegative()) throw new IllegalArgumentException("cleanupInterval 不能为负");
     }
 
     public static CHMRLockConfig defaults() {
