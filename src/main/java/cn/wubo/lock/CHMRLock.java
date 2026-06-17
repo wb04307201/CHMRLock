@@ -63,6 +63,9 @@ public class CHMRLock implements AutoCloseable {
     // 清理线程池：用于定期执行清理任务
     private final ScheduledExecutorService cleanupExecutor;
 
+    // 异步获取锁的线程池：用于 CompletableFuture.supplyAsync 的执行器（守护线程）
+    private final ExecutorService asyncExecutor;
+
     // 锁生命周期监听器列表
     private final List<LockListener> listeners = new CopyOnWriteArrayList<>();
 
@@ -94,6 +97,7 @@ public class CHMRLock implements AutoCloseable {
         this.config = config;
         this.defaultWaitTime = config.defaultWaitTime().toMillis();
         this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config));
+        this.asyncExecutor = Executors.newCachedThreadPool(daemonThreadFactory(config));
 
         // 启动后台清理线程
         startCleanupThread();
@@ -426,6 +430,42 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
+     * 异步获取锁,返回 CompletableFuture&lt;Boolean&gt;。底层使用独立线程池,不会阻塞调用线程。
+     *
+     * <p>底层调用 {@link #tryLock(String)} (使用 {@code defaultWaitTime} 作为等待时间)。</p>
+     *
+     * @param key 锁标识
+     * @return CompletableFuture&lt;Boolean&gt;: true=获取成功,false=超时
+     */
+    public CompletableFuture<Boolean> acquireAsync(String key) {
+        return CompletableFuture.supplyAsync(() -> tryLock(key), asyncExecutor);
+    }
+
+    /**
+     * 异步获取锁,带超时。底层使用独立线程池,不会阻塞调用线程。
+     *
+     * @param key 锁标识
+     * @param waitTime 等待获取的最长时间
+     * @param timeUnit 时间单位
+     * @return CompletableFuture&lt;Boolean&gt;: true=获取成功,false=超时
+     */
+    public CompletableFuture<Boolean> acquireAsync(String key, long waitTime, TimeUnit timeUnit) {
+        return CompletableFuture.supplyAsync(() -> tryLock(key, waitTime, timeUnit), asyncExecutor);
+    }
+
+    /**
+     * 异步获取锁并返回 {@link AcquiredLock} 包装(支持 try-with-resources)。
+     * 底层使用独立线程池,不会阻塞调用线程。语义与 {@link #tryAcquire(String)} 一致
+     * (非可重入:若当前线程已持有 key,返回 {@code Optional.empty()})。
+     *
+     * @param key 锁标识
+     * @return CompletableFuture&lt;Optional&lt;AcquiredLock&gt;&gt;: 成功时 Optional 非空,否则空
+     */
+    public CompletableFuture<Optional<AcquiredLock>> tryAcquireAsync(String key) {
+        return CompletableFuture.supplyAsync(() -> tryAcquire(key), asyncExecutor);
+    }
+
+    /**
      * 原子获取多个 key,全部成功或全部失败。失败时回滚已获取的锁(调用 unlock 释放)。
      * keys 内部按字典序排序后逐个加锁,防止多线程按不同顺序加锁导致的死锁。
      * 重复的 key 会被去重,只加锁一次。
@@ -719,6 +759,9 @@ public class CHMRLock implements AutoCloseable {
             lockMap.clear();
             if (cleanupExecutor != null) {
                 cleanupExecutor.shutdown();
+            }
+            if (asyncExecutor != null) {
+                asyncExecutor.shutdown();
             }
         }
     }
