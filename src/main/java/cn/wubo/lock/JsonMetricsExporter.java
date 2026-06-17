@@ -5,6 +5,9 @@ import java.util.Map;
 /**
  * 默认的 JSON 指标导出器,使用 {@link Appendable} 作为输出目的地。
  * 零三方依赖 — 不使用 Jackson/Gson,手写序列化以保持库的零依赖特性。
+ *
+ * @see MetricsExporter
+ * @since 1.2.0
  */
 public class JsonMetricsExporter implements MetricsExporter {
 

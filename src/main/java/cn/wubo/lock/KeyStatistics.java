@@ -3,6 +3,10 @@ package cn.wubo.lock;
 /**
  * 单个 key 的统计指标。
  * 由 CHMRLock.getStatistics(String key) 返回，仅在 CHMRLockConfig.enablePerKeyMetrics=true 时收集。
+ *
+ * @see CHMRLock#getStatistics(String)
+ * @see CHMRLock#getAllStatistics()
+ * @since 1.2.0
  */
 public record KeyStatistics(
         /** 锁标识。 */

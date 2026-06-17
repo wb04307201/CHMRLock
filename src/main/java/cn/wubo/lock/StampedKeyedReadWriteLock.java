@@ -7,6 +7,9 @@ import java.util.concurrent.locks.StampedLock;
  *
  * <p>非可重入(StampedLock 限制)。写锁释放戳记通过 {@link StampedLock#isWriteLockStamp}
  * 在释放时区分,以便调用方使用对应的 {@code unlockRead}/{@code unlockWrite} 方法。</p>
+ *
+ * @see KeyedReadWriteLock
+ * @since 2.0.0
  */
 final class StampedKeyedReadWriteLock implements KeyedReadWriteLock {
 

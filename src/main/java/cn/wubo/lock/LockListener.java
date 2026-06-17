@@ -13,6 +13,9 @@ package cn.wubo.lock;
  * </ul>
  *
  * <p>监听器抛出的异常会被 CHMRLock 捕获并忽略，不会影响锁功能。</p>
+ *
+ * @see CHMRLockConfig.Builder#lockListener(LockListener)
+ * @since 1.2.0
  */
 public interface LockListener {
 

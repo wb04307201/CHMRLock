@@ -8,6 +8,10 @@ package cn.wubo.lock;
  *
  * <p>乐观读模式:先调用 {@link #tryOptimisticRead} 拿到戳记,读取共享状态后调用
  * {@link #validate(long)} 验证是否被写过。验证失败则需要重读(可能需要升级为悲观读)。</p>
+ *
+ * @see StampedKeyedReadWriteLock
+ * @see CHMRLock#readWriteLock(String)
+ * @since 2.0.0
  */
 public interface KeyedReadWriteLock {
 
