@@ -426,6 +426,84 @@ public class CHMRLock implements AutoCloseable {
     }
 
     /**
+     * 原子获取多个 key,全部成功或全部失败。失败时回滚已获取的锁(调用 unlock 释放)。
+     * keys 内部按字典序排序后逐个加锁,防止多线程按不同顺序加锁导致的死锁。
+     * 重复的 key 会被去重,只加锁一次。
+     * 使用 {@link #defaultWaitTime} 作为单个 key 的最大等待时间。
+     *
+     * @param keys 要获取的 key 列表(可变参数)
+     * @return 是否全部成功;空数组或 null 视为成功(无操作)
+     */
+    public boolean tryMultiLock(String... keys) {
+        return tryMultiLock(defaultWaitTime, 0, TimeUnit.MILLISECONDS, keys);
+    }
+
+    /**
+     * 原子获取多个 key,带超时。失败时回滚已获取的锁。
+     * @param waitTime 单个 key 的最大等待时间(总等待时间近似 N × waitTime,逐 key 递减)
+     * @param timeUnit 时间单位
+     * @param keys 要获取的 key 列表
+     * @return 是否全部成功
+     */
+    public boolean tryMultiLock(long waitTime, TimeUnit timeUnit, String... keys) {
+        return tryMultiLock(waitTime, 0, timeUnit, keys);
+    }
+
+    /**
+     * 原子获取多个 key,带超时与租约。失败时回滚。
+     * 排序与去重:keys 按字典序排序以避免多线程按不同顺序加锁导致的死锁;
+     * 重复 key 仅加锁一次。
+     *
+     * @param waitTime 单个 key 的最大等待时间
+     * @param leaseTime 租约时间,0 表示无租约
+     * @param timeUnit 时间单位
+     * @param keys 要获取的 key 列表
+     * @return 是否全部成功
+     */
+    public boolean tryMultiLock(long waitTime, long leaseTime, TimeUnit timeUnit, String... keys) {
+        if (keys == null || keys.length == 0) return true;
+
+        // Sort + dedupe: lexicographic ordering prevents deadlock across threads,
+        // and distinct() ensures each key is acquired at most once.
+        String[] unique = Arrays.stream(keys).distinct().sorted().toArray(String[]::new);
+
+        // Try to acquire each key in sorted order; track acquired for rollback on failure.
+        List<String> acquired = new ArrayList<>(unique.length);
+        long startNanos = System.nanoTime();
+        long totalNanos = timeUnit.toNanos(waitTime);
+
+        for (String key : unique) {
+            long remainingNanos = totalNanos - (System.nanoTime() - startNanos);
+            if (remainingNanos <= 0) {
+                rollback(acquired);
+                return false;
+            }
+            // Convert remaining nanos to millis for tryLock; ensure at least 1ms to give a chance.
+            long remainingMillis = Math.max(1, remainingNanos / 1_000_000);
+            if (!tryLock(key, remainingMillis, leaseTime, TimeUnit.MILLISECONDS)) {
+                rollback(acquired);
+                return false;
+            }
+            acquired.add(key);
+        }
+        return true;
+    }
+
+    /**
+     * 回滚已获取的 key(在多 key 原子获取失败时调用)。
+     * 任何异常被静默忽略,因为这是 best-effort 回滚。
+     */
+    private void rollback(List<String> acquired) {
+        for (String key : acquired) {
+            try {
+                unlock(key);
+            } catch (Exception ignored) {
+                // best-effort rollback
+            }
+        }
+    }
+
+    /**
      * 释放锁。key 必须已经通过 tryLock 成功获取。
      *
      * <p><b>注意:</b>如果该 key 曾被 {@link #forceUnlock(String)} 强制释放,
