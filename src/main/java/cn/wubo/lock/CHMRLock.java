@@ -123,7 +123,7 @@ public class CHMRLock implements AutoCloseable {
      * @return 是否成功获取
      */
     public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
-        long startTime = System.currentTimeMillis();
+        long startTime = config.clock().millis();
         totalLocks.incrementAndGet();
 
         // maxKeys 限制：仅对"新 key"（不在 map 中）生效，已存在的 key 可重入
@@ -132,7 +132,7 @@ public class CHMRLock implements AutoCloseable {
         if (config.maxKeys() > 0 && !lockMap.containsKey(key)) {
             if (countHeldEntries() >= config.maxKeys()) {
                 failedLocks.incrementAndGet();
-                totalWaitTime.addAndGet(System.currentTimeMillis() - startTime);
+                totalWaitTime.addAndGet(config.clock().millis() - startTime);
                 return false;
             }
         }
@@ -146,7 +146,7 @@ public class CHMRLock implements AutoCloseable {
                 lockEntry.touchLastAcquireTime();
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
                 if (leaseTime > 0) {
-                    long leaseEnd = System.currentTimeMillis() + timeUnit.toMillis(leaseTime);
+                    long leaseEnd = config.clock().millis() + timeUnit.toMillis(leaseTime);
                     lockEntry.setLeaseEndTime(leaseEnd);
                     scheduleLeaseExpiry(key, leaseEnd);
                 }
@@ -160,12 +160,12 @@ public class CHMRLock implements AutoCloseable {
             failedLocks.incrementAndGet();
             return false;
         } finally {
-            totalWaitTime.addAndGet(System.currentTimeMillis() - startTime);
+            totalWaitTime.addAndGet(config.clock().millis() - startTime);
         }
     }
 
     private void scheduleLeaseExpiry(String key, long leaseEndMillis) {
-        long delayMillis = Math.max(0, leaseEndMillis - System.currentTimeMillis());
+        long delayMillis = Math.max(0, leaseEndMillis - config.clock().millis());
         cleanupExecutor.schedule(() -> {
             LockEntry entry = lockMap.get(key);
             if (entry != null && entry.getLeaseEndTime() == leaseEndMillis) {
@@ -248,7 +248,7 @@ public class CHMRLock implements AutoCloseable {
         if (e == null) return false;
         if (!e.lock.isLocked()) return false;
         // 租约到期视为已释放（ReentrantLock 不支持跨线程 force-unlock）
-        if (System.currentTimeMillis() > e.getLeaseEndTime()) {
+        if (config.clock().millis() > e.getLeaseEndTime()) {
             return false;
         }
         return true;
