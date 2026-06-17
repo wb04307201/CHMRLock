@@ -83,4 +83,34 @@ class CHMRLockReadWriteLockTest {
                     "all readers should hold the read lock concurrently");
         }
     }
+
+    @Test
+    void writeLockExcludesReaders() throws Exception {
+        try (CHMRLock lock = new CHMRLock()) {
+            KeyedReadWriteLock rw = lock.readWriteLock("k1");
+            long w = rw.writeLock();
+            // While write is held, tryReadLock should fail
+            assertEquals(0L, rw.tryReadLock(),
+                    "tryReadLock should fail while write is held");
+            // And a blocking read should not acquire
+            CountDownLatch acquired = new CountDownLatch(1);
+            Thread reader = new Thread(() -> {
+                try {
+                    long stamp = rw.readLock();
+                    acquired.countDown();
+                    rw.unlockRead(stamp);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            reader.start();
+            assertFalse(acquired.await(100, TimeUnit.MILLISECONDS),
+                    "reader should be blocked while write is held");
+            rw.unlockWrite(w);
+            // Now reader should acquire
+            assertTrue(acquired.await(2, TimeUnit.SECONDS),
+                    "reader should acquire after write released");
+            reader.join(2000);
+        }
+    }
 }

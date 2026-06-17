@@ -566,8 +566,12 @@ public class CHMRLock implements AutoCloseable {
      * }
      * }</pre>
      *
+     * <p><b>生命周期:</b>读写锁缓存在 {@code rwLockMap} 中,生命周期与 CHMRLock 一致 —
+     * 不受清理线程影响。shutdown 后,已返回的读写锁实例仍可使用。</p>
+     *
      * @param key 锁标识
      * @return 该 key 对应的读写锁实例(同一 key 共享)
+     * @see KeyedReadWriteLock
      */
     public KeyedReadWriteLock readWriteLock(String key) {
         return rwLockMap.computeIfAbsent(key, k -> new StampedKeyedReadWriteLock());
