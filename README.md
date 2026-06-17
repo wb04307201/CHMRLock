@@ -112,6 +112,7 @@ CHMRLock lock = new CHMRLock(config);
 | `getStatistics()` | 全局指标 |
 | `getStatistics(key)` / `getAllStatistics()` | per-key 统计（需 `enablePerKeyMetrics=true`） |
 | `registerListener(LockListener)` / `unregisterListener(LockListener)` | 事件监听 |
+| `MetricsExporter` / `JsonMetricsExporter` | 指标导出 SPI 与默认 JSON 实现 |
 | `shutdown()` / `close()` | 生命周期终止（幂等） |
 
 ## 监控
@@ -182,7 +183,6 @@ lock.registerListener(new LockListener() {
 ```java
 // 使用默认的 JSON 导出器（输出到 System.out）
 JsonMetricsExporter exporter = new JsonMetricsExporter();
-// ... Task 38 will add CHMRLock.exportMetrics(exporter); for now:
 exporter.export(lock.getStatistics(), lock.getAllStatistics());
 ```
 
