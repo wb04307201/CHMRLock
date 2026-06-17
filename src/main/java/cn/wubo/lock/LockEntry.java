@@ -8,6 +8,11 @@ class LockEntry {
     private final AtomicLong lastAcquireTime = new AtomicLong(0);
     private final AtomicLong ownerThreadId = new AtomicLong(-1);
     private final AtomicLong leaseEndTime = new AtomicLong(Long.MAX_VALUE);
+    private final AtomicLong acquireCount = new AtomicLong(0);
+    private final AtomicLong successCount = new AtomicLong(0);
+    private final AtomicLong failedCount = new AtomicLong(0);
+    private final AtomicLong totalWaitNanos = new AtomicLong(0);
+    private final AtomicLong lastReleaseTime = new AtomicLong(Long.MAX_VALUE);
 
     LockEntry() {
         this(false);
@@ -43,4 +48,21 @@ class LockEntry {
     void setLeaseEndTime(long epochMillis) { leaseEndTime.set(epochMillis); }
 
     void clearLease() { leaseEndTime.set(Long.MAX_VALUE); }
+
+    long getAcquireCount() { return acquireCount.get(); }
+    long getSuccessCount() { return successCount.get(); }
+    long getFailedCount() { return failedCount.get(); }
+    long getTotalWaitNanos() { return totalWaitNanos.get(); }
+    long getLastReleaseTime() { return lastReleaseTime.get(); }
+
+    void recordAcquireAttempt() { acquireCount.incrementAndGet(); }
+    void recordAcquireSuccess(long waitNanos) {
+        successCount.incrementAndGet();
+        totalWaitNanos.addAndGet(waitNanos);
+    }
+    void recordAcquireFailure(long waitNanos) {
+        failedCount.incrementAndGet();
+        totalWaitNanos.addAndGet(waitNanos);
+    }
+    void recordRelease(long epochMillis) { lastReleaseTime.set(epochMillis); }
 }
