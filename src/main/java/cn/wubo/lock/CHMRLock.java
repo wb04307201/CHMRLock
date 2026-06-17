@@ -77,17 +77,33 @@ public class CHMRLock implements AutoCloseable {
      * 获取锁（指定等待时间）
      */
     public boolean tryLock(String key, long waitTime, TimeUnit timeUnit) {
+        return tryLock(key, waitTime, 0, timeUnit);
+    }
+
+    /**
+     * 获取锁（指定等待时间和租约时间）。租约到期后若锁仍被持有则强制释放。
+     *
+     * @param key       锁的 key
+     * @param waitTime  等待时间
+     * @param leaseTime 租约时间，<= 0 表示无租约
+     * @param timeUnit  时间单位
+     */
+    public boolean tryLock(String key, long waitTime, long leaseTime, TimeUnit timeUnit) {
         long startTime = System.currentTimeMillis();
         totalLocks.incrementAndGet();
         LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry());
 
         try {
             boolean acquired = lockEntry.lock.tryLock(waitTime, timeUnit);
-
             if (acquired) {
                 successLocks.incrementAndGet();
                 lockEntry.touchLastAcquireTime();
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
+                if (leaseTime > 0) {
+                    long leaseEnd = System.currentTimeMillis() + timeUnit.toMillis(leaseTime);
+                    lockEntry.setLeaseEndTime(leaseEnd);
+                    scheduleLeaseExpiry(key, leaseEnd);
+                }
                 return true;
             } else {
                 failedLocks.incrementAndGet();
@@ -100,6 +116,27 @@ public class CHMRLock implements AutoCloseable {
         } finally {
             totalWaitTime.addAndGet(System.currentTimeMillis() - startTime);
         }
+    }
+
+    private void scheduleLeaseExpiry(String key, long leaseEndMillis) {
+        long delayMillis = Math.max(0, leaseEndMillis - System.currentTimeMillis());
+        cleanupExecutor.schedule(() -> {
+            LockEntry entry = lockMap.get(key);
+            if (entry != null && entry.getLeaseEndTime() == leaseEndMillis) {
+                // 仍处于该租约窗口
+                if (!entry.lock.isLocked()) {
+                    return;  // 已被主动释放
+                }
+                // 强制释放
+                try {
+                    entry.lock.unlock();
+                    entry.clearOwner();
+                    entry.clearLease();
+                } catch (IllegalMonitorStateException ignored) {
+                    // 已被释放
+                }
+            }
+        }, delayMillis, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -121,11 +158,18 @@ public class CHMRLock implements AutoCloseable {
         }
         lockEntry.lock.unlock();
         lockEntry.clearOwner();
+        lockEntry.clearLease();
     }
 
     public boolean isLocked(String key) {
         LockEntry e = lockMap.get(key);
-        return e != null && e.lock.isLocked();
+        if (e == null) return false;
+        if (!e.lock.isLocked()) return false;
+        // 租约到期视为已释放（ReentrantLock 不支持跨线程 force-unlock）
+        if (System.currentTimeMillis() > e.getLeaseEndTime()) {
+            return false;
+        }
+        return true;
     }
 
     public boolean isHeldByCurrentThread(String key) {

@@ -7,6 +7,7 @@ class LockEntry {
     final ReentrantLock lock;
     private final AtomicLong lastAcquireTime = new AtomicLong(0);
     private final AtomicLong ownerThreadId = new AtomicLong(-1);
+    private final AtomicLong leaseEndTime = new AtomicLong(Long.MAX_VALUE);
 
     LockEntry() {
         this(false);
@@ -36,4 +37,10 @@ class LockEntry {
     void clearOwner() {
         ownerThreadId.set(-1);
     }
+
+    long getLeaseEndTime() { return leaseEndTime.get(); }
+
+    void setLeaseEndTime(long epochMillis) { leaseEndTime.set(epochMillis); }
+
+    void clearLease() { leaseEndTime.set(Long.MAX_VALUE); }
 }
