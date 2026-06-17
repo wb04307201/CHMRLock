@@ -137,7 +137,7 @@ public class CHMRLock implements AutoCloseable {
             }
         }
 
-        LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry());
+        LockEntry lockEntry = lockMap.computeIfAbsent(key, k -> new LockEntry(config.fairLock()));
 
         try {
             boolean acquired = lockEntry.lock.tryLock(waitTime, timeUnit);
