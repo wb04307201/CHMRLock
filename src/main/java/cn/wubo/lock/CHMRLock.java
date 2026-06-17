@@ -86,7 +86,8 @@ public class CHMRLock implements AutoCloseable {
 
             if (acquired) {
                 successLocks.incrementAndGet();
-                lockEntry.lastAcquireTime = System.currentTimeMillis();
+                lockEntry.touchLastAcquireTime();
+                lockEntry.setOwnerThreadId(Thread.currentThread().getId());
                 return true;
             } else {
                 failedLocks.incrementAndGet();
@@ -119,6 +120,7 @@ public class CHMRLock implements AutoCloseable {
             throw new LockNotFoundException(key);
         }
         lockEntry.lock.unlock();
+        lockEntry.clearOwner();
     }
 
     public void shutdown() {
