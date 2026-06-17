@@ -1,5 +1,6 @@
 package cn.wubo.lock;
 
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -9,6 +10,9 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
 public class CHMRLock implements AutoCloseable {
+    // 配置
+    private final CHMRLockConfig config;
+
     // 默认等待时间（毫秒）
     private long defaultWaitTime;
 
@@ -29,22 +33,30 @@ public class CHMRLock implements AutoCloseable {
 
 
     public CHMRLock() {
-        this(3_000, TimeUnit.MILLISECONDS);
+        this(CHMRLockConfig.defaults());
     }
 
     public CHMRLock(long defaultWaitTime, TimeUnit timeUnit) {
-        this.defaultWaitTime = timeUnit.toMillis(defaultWaitTime);
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory());
+        this(CHMRLockConfig.builder()
+                .defaultWaitTime(Duration.ofMillis(timeUnit.toMillis(defaultWaitTime)))
+                .build());
+    }
+
+    public CHMRLock(CHMRLockConfig config) {
+        this.config = config;
+        this.defaultWaitTime = config.defaultWaitTime().toMillis();
+        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config));
 
         // 启动后台清理线程
         startCleanupThread();
     }
 
-    private static ThreadFactory daemonThreadFactory() {
+    private static ThreadFactory daemonThreadFactory(CHMRLockConfig config) {
         AtomicInteger seq = new AtomicInteger(1);
+        String prefix = "chmrlock-cleanup";
         return r -> {
-            Thread t = new Thread(r, "chmrlock-cleanup-" + seq.getAndIncrement());
-            t.setDaemon(true);
+            Thread t = new Thread(r, prefix + "-" + seq.getAndIncrement());
+            t.setDaemon(config.daemonCleanupThread());
             return t;
         };
     }
@@ -53,17 +65,22 @@ public class CHMRLock implements AutoCloseable {
      * 启动后台定时清理线程，定期执行清理任务
      */
     private void startCleanupThread() {
-        cleanupExecutor.scheduleAtFixedRate(() -> {
-            long currentTime = System.currentTimeMillis();
-            long expiryThreshold = 5 * 60_000; // 5分钟未使用则清理
+        long intervalMillis = config.cleanupInterval().toMillis();
+        cleanupExecutor.scheduleAtFixedRate(this::cleanupTick,
+                intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
+    }
 
-            lockMap.entrySet().removeIf(entry -> {
-                LockEntry lockEntry = entry.getValue();
-                // 检查锁是否未被占用且长时间未使用
-                return !lockEntry.lock.isLocked() &&
-                        (currentTime - lockEntry.getLastAcquireTime() > expiryThreshold);
-            });
-        }, 1, 1, TimeUnit.SECONDS); // 每秒执行一次清理
+    private void cleanupTick() {
+        long now = config.clock().millis();
+        long threshold = config.idleThreshold().toMillis();
+        lockMap.entrySet().removeIf(entry -> {
+            LockEntry le = entry.getValue();
+            if (le.lock.isLocked()) return false;
+            if (le.getLeaseEndTime() != Long.MAX_VALUE && le.getLeaseEndTime() < now) {
+                return false;  // 租约未到，保留（理论上不会出现这种情况）
+            }
+            return (now - le.getLastAcquireTime()) > threshold;
+        });
     }
 
     /**
