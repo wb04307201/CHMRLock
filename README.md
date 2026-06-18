@@ -2,7 +2,13 @@
 
 > 基于 `ConcurrentHashMap` + `ReentrantLock` 的细粒度单机锁库。每个 key 独立加锁，支持重入、租约、监控统计。
 
-[![](https://jitpack.io/v/io.github.wb04307201/CHMRLock.svg)](https://jitpack.io/#io.github.wb04307201/CHMRLock)
+![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/CHMRLock?style=flat-square)
+[![star](https://gitee.com/wb04307201/CHMRLock/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/CHMRLock)
+[![fork](https://gitee.com/wb04307201/CHMRLock/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/CHMRLock)
+[![star](https://img.shields.io/github/stars/wb04307201/CHMRLock)](https://github.com/wb04307201/CHMRLock)
+[![fork](https://img.shields.io/github/forks/wb04307201/CHMRLock)](https://github.com/wb04307201/CHMRLock)
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg)
+![JDK](https://img.shields.io/badge/JDK-17+-green.svg)
 
 ## 特性
 
