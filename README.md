@@ -14,6 +14,7 @@
 - **per-key 统计**：`getStatistics(key)` / `getAllStatistics()` 提供每个 key 的细粒度指标（需 `enablePerKeyMetrics=true`）
 - **事件监听**：`LockListener` 接口支持监听锁的获取/释放/失败/到期/争用事件
 - **指标导出**：`MetricsExporter` SPI + 默认 `JsonMetricsExporter` 实现，支持自定义导出格式（Prometheus / StatsD 等）
+- **统计持久化**：`StatisticsSink` SPI 用于将累计统计写入数据库 / 时序数据库 / 日志文件
 - **生命周期安全**：`shutdown()` 幂等，shutdown 后再调 `tryLock`/`lock`/`tryAcquireAsync` 会快速失败（见 [行为约定](#行为约定)），清理线程为守护线程
 - **try-with-resources**：`AcquiredLock` 实现 `AutoCloseable`
 - **内存安全**：`maxKeys` 配置可限制最大 key 数，防止内存泄漏
@@ -95,11 +96,16 @@ if (lock.tryLock("resource_id", 1, 30, TimeUnit.SECONDS)) {
 
 ```java
 CHMRLockConfig config = CHMRLockConfig.builder()
-    .defaultWaitTime(Duration.ofSeconds(5))
-    .idleThreshold(Duration.ofMinutes(10))
-    .cleanupInterval(Duration.ofSeconds(30))
-    .maxKeys(10_000)
-    .enablePerKeyMetrics(true)   // 开启 per-key 统计（默认 false）
+    .defaultWaitTime(Duration.ofSeconds(5))    // tryLock 默认等待时长
+    .idleThreshold(Duration.ofMinutes(10))     // 空闲 key 多久后被清理
+    .cleanupInterval(Duration.ofSeconds(30))   // 清理线程执行间隔
+    .maxKeys(10_000)                            // 同时持有 key 数上限(0=不限)
+    .enablePerKeyMetrics(true)                  // 开启 per-key 统计（默认 false）
+    .forceUnlockEnabled(false)                  // 是否允许跨线程 forceUnlock（默认 false）
+    .forceUnlockOnLeaseExpiry(true)             // 租约到期是否自动 forceUnlock（默认 true）
+    .fairLock(false)                            // 是否使用公平锁（默认 false）
+    .daemonCleanupThread(true)                  // 清理线程是否守护线程（默认 true）
+    .clock(Clock.systemUTC())                   // 用于租约计算（默认系统 UTC）
     .build();
 CHMRLock lock = new CHMRLock(config);
 ```
@@ -132,8 +138,6 @@ future.thenAccept(maybeLock -> maybeLock.ifPresent(al -> {
         al.close();
     }
 }));
-```
-});
 ```
 
 > **注意**：取消 `Future` 不会中断底层加锁；若加锁成功，锁由异步线程持有，必须调用 `unlock` 或 `forceUnlock` 释放。
@@ -172,20 +176,26 @@ try {
 |------|------|
 | `tryLock(key)` / `tryLock(key, waitTime, unit)` | 非阻塞获取；shutdown 后抛 `IllegalStateException` |
 | `tryLock(key, waitTime, leaseTime, unit)` | 带租约的获取 |
-| `lock(key)` / `lockInterruptibly(key, leaseTime, unit)` | 阻塞获取（可中断）；shutdown 后抛 `IllegalStateException`；超出 `maxKeys` 时抛 `MaxKeysExceededException` |
-| `tryMultiLock(waitTime, unit, keys...)` | 原子获取多 key（内置死锁防护）；超时按总 `waitTime` 控制 |
-| `tryAcquire(key)` | 返回 `Optional<AcquiredLock>`，支持 try-with-resources |
+| `tryLock(key, waitTime)` | 毫秒为单位的便捷重载 |
+| `lock(key)` / `lock(key, leaseTime, unit)` / `lockInterruptibly(key, leaseTime, unit)` | 阻塞获取（可中断）；shutdown 后抛 `IllegalStateException`；超出 `maxKeys` 时抛 `MaxKeysExceededException` |
+| `tryMultiLock(waitTime, unit, keys...)` / `tryMultiLock(keys...)` / `tryMultiLock(waitTime, leaseTime, unit, keys...)` | 原子获取多 key（内置死锁防护）；超时按总 `waitTime` 控制 |
+| `tryAcquire(key)` / `tryAcquire(key, waitTime, unit)` / `tryAcquire(key, waitTime, leaseTime, unit)` | 返回 `Optional<AcquiredLock>`，支持 try-with-resources |
 | `tryAcquireAsync(key)` / `tryAcquireAsync(key, waitTime, unit)` | 异步获取，返回 `CompletableFuture`；shutdown 后抛 `RejectedExecutionException` |
 | `readWriteLock(key)` | 返回 `KeyedReadWriteLock`（StampedLock 实现） |
 | `forceUnlock(key)` | 跨线程强制释放（需 `forceUnlockEnabled=true`）；未知 key 是 no-op |
 | `unlock(key)` | 释放；释放后再 unlock 抛 `IllegalMonitorStateException`；未知 key 是 no-op |
-| `isLocked(key)` / `isHeldByCurrentThread(key)` / `getHoldCount(key)` | 查询（`null`/空 key 抛 `IllegalArgumentException`/`NullPointerException`） |
+| `isLocked(key)` / `isHeldByCurrentThread(key)` / `getHoldCount(key)` / `getOwnerThreadId(key)` | 查询（`null`/空 key 抛 `IllegalArgumentException`/`NullPointerException`） |
 | `getActiveKeys()` | 当前所有 key（不可变视图） |
 | `getStatistics()` | 全局指标 |
 | `getStatistics(key)` / `getAllStatistics()` | per-key 统计（需 `enablePerKeyMetrics=true`） |
 | `registerListener(LockListener)` / `unregisterListener(LockListener)` | 事件监听；`registerListener(null)` 抛 NPE |
+| `registerDistributedLock(name, DistributedLock)` / `getDistributedLock(name)` / `unregisterDistributedLock(name)` | 分布式锁 SPI 接入（按 name 索引） |
+| `exportMetrics(MetricsExporter)` | 一次性指标导出 |
+| `recordStatistics(StatisticsSink)` | 触发一次统计持久化（写入数据库 / 时序库） |
 | `MetricsExporter` / `JsonMetricsExporter` | 指标导出 SPI 与默认 JSON 实现 |
-| `shutdown()` / `close()` | 生命周期终止（幂等）；shutdown 后全局统计仍可读 |
+| `StatisticsSink` | 统计持久化 SPI（累积型，适合写入数据库） |
+| `DistributedLock` / `DistributedAcquiredLock` | 分布式锁 SPI 与 try-with-resources 包装 |
+| `shutdown()` / `close()` / `isShutdown()` | 生命周期终止（幂等）；shutdown 后全局统计仍可读 |
 
 ## 监控
 
@@ -282,6 +292,40 @@ exporter.export(lock.getStatistics(), lock.getAllStatistics());
 
 可以自定义实现（对接 Prometheus / StatsD / InfluxDB 等）。
 
+### 统计持久化
+
+`StatisticsSink` SPI 用于把累计统计写入持久化存储（数据库 / 时序数据库 / 日志文件等），与 `MetricsExporter`（一次性推送）的区别在于前者持续累积。
+
+```java
+public class JdbcStatisticsSink implements StatisticsSink {
+    private final DataSource ds;
+    public JdbcStatisticsSink(DataSource ds) { this.ds = ds; }
+
+    @Override
+    public void record(MonitorMetrics global, Map<String, KeyStatistics> perKey) {
+        try (Connection c = ds.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                 "INSERT INTO lock_stats (ts, total, success, failed) VALUES (?, ?, ?, ?)")) {
+            ps.setTimestamp(1, new Timestamp(System.currentTimeMillis()));
+            ps.setLong(2, global.getTotalLocks());
+            ps.setLong(3, global.getSuccessLocks());
+            ps.setLong(4, global.getFailedLocks());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            // 异常隔离:不应传播到调用方
+        }
+    }
+}
+
+// 由业务方周期性触发(库不内置调度器)
+ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+scheduler.scheduleAtFixedRate(
+    () -> lock.recordStatistics(new JdbcStatisticsSink(dataSource)),
+    0, 60, TimeUnit.SECONDS);
+```
+
+`StatisticsSink` 实现需保证线程安全、异常隔离、幂等性。
+
 ## 行为约定
 
 - **非公平锁**：默认使用 `ReentrantLock(false)`
@@ -298,6 +342,7 @@ exporter.export(lock.getStatistics(), lock.getAllStatistics());
 - **事件监听器异常隔离**：监听器抛 `Throwable`（包括 `Error`）都会被捕获并忽略，不影响锁功能
 - **租约到期事件**：由于 `ReentrantLock` 不支持跨线程强制释放，`onLockExpired` 触发后租约状态已清理，但底层锁可能仍由原持有线程持有 — 需通过 `isLocked` 验证或显式 `unlock`
 - **`getHoldCount` 跨线程读返回持有线程的重入深度**（即 `holderHoldCount`），而非 `ReentrantLock.getHoldCount()` 的 thread-local 视角；持有线程自己读则同 `ReentrantLock.getHoldCount()`
+- **`forceUnlockOnLeaseExpiry` 配置**：默认 `true`，租约到期后自动 `forceUnlock` 并触发 `onLockReleased`；设为 `false` 时租约到期不自动释放，由业务侧处理（`isLocked` 仍按 `forceUnlock` 时点判断）
 
 ## 高级用法
 
