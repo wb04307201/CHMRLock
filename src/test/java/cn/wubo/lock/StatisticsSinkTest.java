@@ -45,7 +45,7 @@ class StatisticsSinkTest {
         List<Map<String, KeyStatistics>> received = new ArrayList<>();
         StatisticsSink sink = (global, perKey) -> received.add(perKey);
 
-        KeyStatistics ks = new KeyStatistics("k1", 5, 4, 1, 0L, 0L, 0L, 1, 1L);
+        KeyStatistics ks = new KeyStatistics("k1", 5, 4, 1, 0L, 0L, 0L, 1L, 1L);
         sink.record(new MonitorMetrics(5, 4, 1, 0), Map.of("k1", ks));
 
         assertEquals(1, received.size());

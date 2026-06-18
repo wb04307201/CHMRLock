@@ -28,7 +28,7 @@ import java.util.concurrent.TimeUnit;
  * <pre>{@code
  * DistributedLock distLock = new RedissonAdapter(redissonClient);
  * try (CHMRLock lock = new CHMRLock()) {
- *     lock.registerDistributedLock(distLock);
+ *     lock.registerDistributedLock("tenantA", distLock);
  *     if (lock.tryLock("resource", 5, TimeUnit.SECONDS)) {
  *         try {
  *             doWork();

@@ -99,23 +99,11 @@ class CHMRLockAsyncTest {
         assertTrue(f1.get(2, TimeUnit.SECONDS).isPresent());
         // Close should also shutdown the async executor
         lock.shutdown();
-        // After shutdown, new async tasks should be rejected.
-        // supplyAsync(RejectedExecutionException) is the typical behavior for a shut-down
-        // ExecutorService; the supplier may also complete the future exceptionally.
-        // We accept either form (synchronous throw or completed-exceptionally future).
-        try {
-            CompletableFuture<Optional<AcquiredLock>> f2 = lock.tryAcquireAsync("k2", 1, TimeUnit.SECONDS);
-            // If we got a future back, it must complete exceptionally.
-            try {
-                f2.get(2, TimeUnit.SECONDS);
-                fail("expected RejectedExecutionException (sync or async) after shutdown");
-            } catch (java.util.concurrent.ExecutionException ee) {
-                Throwable cause = ee.getCause();
-                assertTrue(cause instanceof RejectedExecutionException,
-                        "future should complete exceptionally with RejectedExecutionException, was: " + cause);
-            }
-        } catch (RejectedExecutionException expected) {
-            // Synchronous rejection: also acceptable.
-        }
+        // R6 修复(R-2):asyncExecutor 自定义 handler 改为"shutdown 抛 REE,队列满时调用线程执行"。
+        // shutdown 后业务方应显式捕获并降级处理(不再被调用线程同步阻塞 3 秒+)。
+        // 业务方正确处理方式:捕获 REE 后转为同步 tryAcquire 或放弃。
+        assertThrows(RejectedExecutionException.class,
+                () -> lock.tryAcquireAsync("k2", 1, TimeUnit.SECONDS),
+                "R6 修复后 shutdown 应抛 RejectedExecutionException");
     }
 }

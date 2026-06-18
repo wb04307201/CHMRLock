@@ -2,7 +2,10 @@ package cn.wubo.lock;
 
 /**
  * 单个 key 的统计指标。
- * 由 CHMRLock.getStatistics(String key) 返回，仅在 CHMRLockConfig.enablePerKeyMetrics=true 时收集。
+ * 由 CHMRLock.getStatistics(String key) 返回,仅在 CHMRLockConfig.enablePerKeyMetrics=true 时收集。
+ *
+ * <p>R6 修复(E-9):{@link #currentHoldCount()} 由 {@code int} 改为 {@code long},
+ * 与 {@link LockEntry#getHolderHoldCount()} 一致,避免极端重入深度下溢出。</p>
  *
  * @see CHMRLock#getStatistics(String)
  * @see CHMRLock#getAllStatistics()
@@ -18,7 +21,7 @@ public record KeyStatistics(
         /** 累计的获取失败次数(超时 / maxKeys / 中断)。 */
         long failedCount,
         /**
-         * 累计等待时间(纳秒)。通过 System.nanoTime() 测量，精度为纳秒级。
+         * 累计等待时间(纳秒)。通过 System.nanoTime() 测量,精度为纳秒级。
          * 注意:包含成功与失败两种获取的总等待时间。
          */
         long totalWaitNanos,
@@ -27,7 +30,7 @@ public record KeyStatistics(
         /** 最近一次成功释放锁的 epoch 毫秒时间戳;0 表示从未释放。 */
         long lastReleaseEpochMs,
         /** 当前线程对该 key 的重入深度(0 表示未持有)。 */
-        int currentHoldCount,
+        long currentHoldCount,
         /** 当前持有该 key 的线程 id;-1 表示未被持有。 */
         long currentHolderThreadId
 ) {

@@ -1,18 +1,22 @@
 package cn.wubo.lock;
 
 /**
- * 锁生命周期监听器。所有方法默认 no-op，实现类按需覆盖感兴趣的事件。
+ * 锁生命周期监听器。所有方法默认 no-op,实现类按需覆盖感兴趣的事件。
  *
- * <p>事件触发时机：</p>
+ * <p>事件触发时机:</p>
  * <ul>
  *   <li>{@link #onLockAcquired} - tryLock 成功获取后</li>
  *   <li>{@link #onLockReleased} - unlock 成功后</li>
- *   <li>{@link #onLockFailed} - tryLock 失败（reason: timeout / maxKeys / interrupted）</li>
+ *   <li>{@link #onLockFailed} - tryLock 失败(reason: timeout / maxKeys / interrupted)</li>
  *   <li>{@link #onLockExpired} - 租约到期强制释放后</li>
- *   <li>{@link #onLockContended} - tryLock(无等待) 发现 key 已被持有</li>
+ *   <li>{@link #onLockContended} - tryLock 发现 key 已被其他线程持有(无论是否阻塞)</li>
  * </ul>
  *
- * <p>监听器抛出的异常会被 CHMRLock 捕获并忽略，不会影响锁功能。</p>
+ * <p>监听器抛出的异常(包括 {@link Error})会被 CHMRLock 捕获并忽略,不会影响锁功能。</p>
+ *
+ * <p><b>R6 修复(E-6):</b>listener 同步调用,无超时保护 —— <b>listener 实现必须快速且无副作用</b>,
+ * 不应包含阻塞 I/O、网络请求、死循环等,否则会拖慢整个锁获取路径与 tryLock/tryRelease 调用栈。
+ * 若需要异步处理,建议在 listener 内投递到独立 ExecutorService。</p>
  *
  * <p>注册方式:通过 {@link CHMRLock#registerListener(LockListener)} 在运行时注册
  * (而非构建配置时)。注销通过 {@link CHMRLock#unregisterListener(LockListener)}。</p>

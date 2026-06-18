@@ -54,9 +54,19 @@ public interface KeyedReadWriteLock {
      */
     boolean validate(long stamp);
 
-    /** 释放读锁。{@code stamp} 必须来自 {@link #readLock()} 或 {@link #tryReadLock()}。 */
+    /**
+     * 释放读锁。
+     * @param stamp 持锁令牌,必须来自 {@link #readLock()} 或 {@link #tryReadLock()}
+     * @throws IllegalMonitorStateException 若 {@code stamp} 不是有效的读锁戳记
+     *         (例如戳记错误、对应的是写锁、锁已被释放等)
+     */
     void unlockRead(long stamp);
 
-    /** 释放写锁。{@code stamp} 必须来自 {@link #writeLock()} 或 {@link #tryWriteLock()}。 */
+    /**
+     * 释放写锁。
+     * @param stamp 持锁令牌,必须来自 {@link #writeLock()} 或 {@link #tryWriteLock()}
+     * @throws IllegalMonitorStateException 若 {@code stamp} 不是有效的写锁戳记
+     *         (例如戳记错误、对应的是读锁、锁已被释放等)
+     */
     void unlockWrite(long stamp);
 }

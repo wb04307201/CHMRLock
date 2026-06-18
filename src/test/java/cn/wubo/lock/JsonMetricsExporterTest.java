@@ -43,9 +43,9 @@ class JsonMetricsExporterTest {
         MonitorMetrics global = new MonitorMetrics(0, 0, 0, 0);
         Map<String, KeyStatistics> perKey = new LinkedHashMap<>();
         perKey.put("k1", new KeyStatistics(
-                "k1", 5, 4, 1, 1_000_000L, 1000L, 2000L, 1, 42L));
+                "k1", 5, 4, 1, 1_000_000L, 1000L, 2000L, 1L, 42L));
         perKey.put("k2", new KeyStatistics(
-                "k2", 3, 3, 0, 0L, 3000L, 4000L, 0, -1L));
+                "k2", 3, 3, 0, 0L, 3000L, 4000L, 0L, -1L));
         String json = exp.exportToString(global, perKey);
         assertTrue(json.contains("\"k1\""));
         assertTrue(json.contains("\"k2\""));
@@ -92,7 +92,7 @@ class JsonMetricsExporterTest {
         Map<String, KeyStatistics> perKey = new LinkedHashMap<>();
         // Key with quote, backslash, newline, tab, and a control char (U+0001)
         perKey.put("k\"\\\n\t", new KeyStatistics(
-                "k\"\\\n\t", 1, 1, 0, 0L, 0L, 0L, 0, -1L));
+                "k\"\\\n\t", 1, 1, 0, 0L, 0L, 0L, 0L, -1L));
         String json = exp.exportToString(global, perKey);
         // Verify all control chars are properly escaped per RFC 8259
         assertTrue(json.contains("\\\""));
@@ -110,9 +110,9 @@ class JsonMetricsExporterTest {
         MonitorMetrics global = new MonitorMetrics(0, 0, 0, 0);
         // LinkedHashMap preserves insertion order
         Map<String, KeyStatistics> perKey = new LinkedHashMap<>();
-        perKey.put("zebra", new KeyStatistics("zebra", 0, 0, 0, 0, 0, 0, 0, -1));
-        perKey.put("alpha", new KeyStatistics("alpha", 0, 0, 0, 0, 0, 0, 0, -1));
-        perKey.put("mango", new KeyStatistics("mango", 0, 0, 0, 0, 0, 0, 0, -1));
+        perKey.put("zebra", new KeyStatistics("zebra", 0, 0, 0, 0, 0, 0, 0L, -1L));
+        perKey.put("alpha", new KeyStatistics("alpha", 0, 0, 0, 0, 0, 0, 0L, -1L));
+        perKey.put("mango", new KeyStatistics("mango", 0, 0, 0, 0, 0, 0, 0L, -1L));
         String json = exp.exportToString(global, perKey);
         int zebraIdx = json.indexOf("\"zebra\"");
         int alphaIdx = json.indexOf("\"alpha\"");
