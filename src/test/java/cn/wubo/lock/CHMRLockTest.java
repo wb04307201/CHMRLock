@@ -119,7 +119,11 @@ public class CHMRLockTest {
     }
 
     /**
-     * 测试shutdown方法是否正确清理资源
+     * 测试shutdown方法是否正确清理资源。
+     *
+     * <p>R6 修复(R-1):shutdown 后 tryLock 抛 {@link IllegalStateException},
+     * 防止新 entry 加入已停止清理线程的 lockMap。之前的测试行为("shutdown 后
+     * 仍可获取新锁")是已知的内存泄漏,现在改为显式失败。</p>
      */
     @Test
     public void testShutdownResourceCleanup() {
@@ -135,12 +139,10 @@ public class CHMRLockTest {
         // 执行清理
         lockManager.shutdown();
 
-        // 验证资源被清理（通过尝试获取锁来间接验证）
-        assertTrue(lockManager.tryLock("cleanup_key1"), "清理后应能获取新锁");
-        assertTrue(lockManager.tryLock("cleanup_key4"), "应能获取新key的锁");
-
-        lockManager.unlock("cleanup_key1");
-        lockManager.unlock("cleanup_key4");
+        // R6 修复(R-1):shutdown 后 tryLock 抛 IllegalStateException
+        assertThrows(IllegalStateException.class, () -> lockManager.tryLock("cleanup_key1"),
+                "shutdown 后应拒绝新增 entry(R6 修复 R-1)");
+        assertThrows(IllegalStateException.class, () -> lockManager.tryLock("cleanup_key4"));
     }
 
     /**
@@ -190,5 +192,20 @@ public class CHMRLockTest {
 
         // 验证至少有一些线程成功获取了锁
         assertFalse(acquisitionOrder.isEmpty(), "应有线程成功获取锁");
+    }
+
+    @Test
+    public void testUnlockUnknownKeyIsNoop() {
+        // 未知 key 的 unlock 应为幂等 no-op(避免 AcquiredLock.close() 在清理后失败)
+        assertDoesNotThrow(() -> lockManager.unlock("never_locked"));
+    }
+
+    @Test
+    public void testUnlockAfterReleaseThrows() {
+        assertTrue(lockManager.tryLock("temp"));
+        lockManager.unlock("temp");
+        // 释放后 entry 仍存在但 lock 未持有
+        assertThrows(IllegalMonitorStateException.class,
+                () -> lockManager.unlock("temp"));
     }
 }

@@ -1,0 +1,58 @@
+package cn.wubo.lock;
+
+/**
+ * 锁生命周期监听器。所有方法默认 no-op,实现类按需覆盖感兴趣的事件。
+ *
+ * <p>事件触发时机:</p>
+ * <ul>
+ *   <li>{@link #onLockAcquired} - tryLock 成功获取后</li>
+ *   <li>{@link #onLockReleased} - unlock 成功后</li>
+ *   <li>{@link #onLockFailed} - tryLock 失败(reason: timeout / maxKeys / interrupted)</li>
+ *   <li>{@link #onLockExpired} - 租约到期强制释放后</li>
+ *   <li>{@link #onLockContended} - tryLock 发现 key 已被其他线程持有(无论是否阻塞)</li>
+ * </ul>
+ *
+ * <p>监听器抛出的异常(包括 {@link Error})会被 CHMRLock 捕获并忽略,不会影响锁功能。</p>
+ *
+ * <p><b>R6 修复(E-6):</b>listener 同步调用,无超时保护 —— <b>listener 实现必须快速且无副作用</b>,
+ * 不应包含阻塞 I/O、网络请求、死循环等,否则会拖慢整个锁获取路径与 tryLock/tryRelease 调用栈。
+ * 若需要异步处理,建议在 listener 内投递到独立 ExecutorService。</p>
+ *
+ * <p>注册方式:通过 {@link CHMRLock#registerListener(LockListener)} 在运行时注册
+ * (而非构建配置时)。注销通过 {@link CHMRLock#unregisterListener(LockListener)}。</p>
+ *
+ * @since 1.2.0
+ */
+public interface LockListener {
+
+    /** 锁被成功获取后触发。{@code waitNanos} 是实际等待时长(纳秒)。 */
+    default void onLockAcquired(String key, long waitNanos) {}
+
+    /** 锁被释放后触发。{@code heldMillis} 是持有时长(毫秒)。 */
+    default void onLockReleased(String key, long heldMillis) {}
+
+    /**
+     * 获取锁失败时触发。{@code reason} 取值:
+     * <ul>
+     *   <li>{@code "timeout"} - 等待超时</li>
+     *   <li>{@code "maxKeys"} - 超过 maxKeys 限制</li>
+     *   <li>{@code "interrupted"} - 等待中被中断</li>
+     * </ul>
+     */
+    default void onLockFailed(String key, long waitNanos, String reason) {}
+
+    /**
+     * 租约到期后触发。注意:由于 {@link java.util.concurrent.locks.ReentrantLock}
+     * 不支持跨线程强制释放,此事件触发后,租约状态(owner/leaseEndTime)已被清理,
+     * 但底层锁可能仍由原持有线程持有 — 调用方应通过 {@link CHMRLock#isLocked(String)}
+     * 验证实际状态,或调用 {@link CHMRLock#unlock(String)} 显式释放。
+     */
+    default void onLockExpired(String key) {}
+
+    /**
+     * tryLock(无等待) 发现 key 已被持有时触发。
+     * 注意:仅在非阻塞 tryLock 中触发，阻塞 tryLock 不会触发(无法在
+     * 锁内便宜地检测"曾经被争用")。
+     */
+    default void onLockContended(String key) {}
+}
