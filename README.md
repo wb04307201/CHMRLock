@@ -26,17 +26,19 @@
 - **读写锁**：`readWriteLock` 返回基于 `StampedLock` 的非可重入读写锁
 - **零三方依赖**
 
-## 引入
+---
 
-### 依赖
+## 引入依赖
 
 ```xml
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>CHMRLock</artifactId>
-    <version>2.0.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
+
+---
 
 ## 快速开始
 
