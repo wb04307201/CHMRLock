@@ -14,10 +14,11 @@
 - **per-key 统计**：`getStatistics(key)` / `getAllStatistics()` 提供每个 key 的细粒度指标（需 `enablePerKeyMetrics=true`）
 - **事件监听**：`LockListener` 接口支持监听锁的获取/释放/失败/到期/争用事件
 - **指标导出**：`MetricsExporter` SPI + 默认 `JsonMetricsExporter` 实现，支持自定义导出格式（Prometheus / StatsD 等）
-- **生命周期安全**：`shutdown()` 幂等，清理线程为守护线程
+- **生命周期安全**：`shutdown()` 幂等，shutdown 后再调 `tryLock`/`lock`/`tryAcquireAsync` 会快速失败（见 [行为约定](#行为约定)），清理线程为守护线程
 - **try-with-resources**：`AcquiredLock` 实现 `AutoCloseable`
 - **内存安全**：`maxKeys` 配置可限制最大 key 数，防止内存泄漏
 - **可配置**：`CHMRLockConfig` 暴露 idleThreshold / cleanupInterval / Clock 等
+- **输入校验**：`null` 或空字符串 key 会被拒绝（抛 `IllegalArgumentException`/`NullPointerException`）
 - **多 key 原子加锁**：`tryMultiLock` 同时获取多个 key（内置死锁防护：按字典序排序去重）
 - **异步获取锁**：`tryAcquireAsync` 通过专用守护线程池执行，不阻塞调用线程
 - **强制释放**：`forceUnlock` 跨线程解锁，适合租约已过期或持有线程失联等异常场景
@@ -149,7 +150,7 @@ CHMRLock lock = new CHMRLock(config);
 lock.forceUnlock("resource_id");  // 任意线程可调用，立即让 isLocked 返回 false
 ```
 
-> **警告**：`forceUnlock` 会绕过 owner 检查，可能导致原持有线程的 `unlock` 抛出 `IllegalMonitorStateException`。仅在租约过期 / 持有线程已死等异常场景使用。
+> **警告**：`forceUnlock` 会绕过 owner 检查，立刻将 `isLocked` 翻转为 `false`，并触发 `onLockReleased`。底层 `ReentrantLock` 的实际持有状态由原线程决定；持有线程再调 `unlock` 是幂等 no-op（不会抛 `IllegalMonitorStateException`）。仅在租约过期 / 持有线程已死等异常场景使用。
 
 ### 读写锁
 
@@ -169,22 +170,22 @@ try {
 
 | 方法 | 说明 |
 |------|------|
-| `tryLock(key)` / `tryLock(key, waitTime, unit)` | 非阻塞获取 |
+| `tryLock(key)` / `tryLock(key, waitTime, unit)` | 非阻塞获取；shutdown 后抛 `IllegalStateException` |
 | `tryLock(key, waitTime, leaseTime, unit)` | 带租约的获取 |
-| `lock(key)` / `lockInterruptibly(key, leaseTime, unit)` | 阻塞获取（可中断） |
-| `tryMultiLock(waitTime, unit, keys...)` | 原子获取多 key（内置死锁防护） |
+| `lock(key)` / `lockInterruptibly(key, leaseTime, unit)` | 阻塞获取（可中断）；shutdown 后抛 `IllegalStateException`；超出 `maxKeys` 时抛 `MaxKeysExceededException` |
+| `tryMultiLock(waitTime, unit, keys...)` | 原子获取多 key（内置死锁防护）；超时按总 `waitTime` 控制 |
 | `tryAcquire(key)` | 返回 `Optional<AcquiredLock>`，支持 try-with-resources |
-| `tryAcquireAsync(key)` / `tryAcquireAsync(key, waitTime, unit)` | 异步获取，返回 `CompletableFuture` |
+| `tryAcquireAsync(key)` / `tryAcquireAsync(key, waitTime, unit)` | 异步获取，返回 `CompletableFuture`；shutdown 后抛 `RejectedExecutionException` |
 | `readWriteLock(key)` | 返回 `KeyedReadWriteLock`（StampedLock 实现） |
-| `forceUnlock(key)` | 跨线程强制释放（需 `forceUnlockEnabled=true`） |
-| `unlock(key)` | 释放（未持有抛 `LockNotFoundException`） |
-| `isLocked(key)` / `isHeldByCurrentThread(key)` / `getHoldCount(key)` | 查询 |
+| `forceUnlock(key)` | 跨线程强制释放（需 `forceUnlockEnabled=true`）；未知 key 是 no-op |
+| `unlock(key)` | 释放；释放后再 unlock 抛 `IllegalMonitorStateException`；未知 key 是 no-op |
+| `isLocked(key)` / `isHeldByCurrentThread(key)` / `getHoldCount(key)` | 查询（`null`/空 key 抛 `IllegalArgumentException`/`NullPointerException`） |
 | `getActiveKeys()` | 当前所有 key（不可变视图） |
 | `getStatistics()` | 全局指标 |
 | `getStatistics(key)` / `getAllStatistics()` | per-key 统计（需 `enablePerKeyMetrics=true`） |
-| `registerListener(LockListener)` / `unregisterListener(LockListener)` | 事件监听 |
+| `registerListener(LockListener)` / `unregisterListener(LockListener)` | 事件监听；`registerListener(null)` 抛 NPE |
 | `MetricsExporter` / `JsonMetricsExporter` | 指标导出 SPI 与默认 JSON 实现 |
-| `shutdown()` / `close()` | 生命周期终止（幂等） |
+| `shutdown()` / `close()` | 生命周期终止（幂等）；shutdown 后全局统计仍可读 |
 
 ## 监控
 
@@ -286,13 +287,17 @@ exporter.export(lock.getStatistics(), lock.getAllStatistics());
 - **非公平锁**：默认使用 `ReentrantLock(false)`
 - **清理线程**：默认守护线程，命名 `chmrlock-cleanup-N`，可配置清理间隔
 - **租约到期**：通过 `isLocked` 报告锁已释放，原线程需主动 `unlock`
-- **`shutdown()` 幂等**：可重复调用
-- **跨线程 `unlock` 抛 `IllegalMonitorStateException`**：调用方需保证锁由当前线程释放
-- **`unlock` 未知 key 抛 `LockNotFoundException`**：防止误用掩盖 bug
-- **`maxKeys` 限制同时持有的 key 数**：超过后 `tryLock` 返回 `false`
+- **`shutdown()` 幂等**：可重复调用。shutdown 后再调 `tryLock`/`lock`/`tryMultiLock` 立即抛 `IllegalStateException`（防止新 entry 加入已停清理的 lockMap）
+- **shutdown 后 `tryAcquireAsync`**：抛 `RejectedExecutionException`，业务方需显式捕获并降级（如降级到同步 `tryAcquire`）
+- **shutdown 后 `unlock`/`getStatistics`**：仍可调用，`unlock` 是 no-op，`getStatistics` 返回最终快照
+- **`null`/空字符串 key 一律拒绝**：所有公开方法（`tryLock`/`unlock`/`forceUnlock`/`isLocked`/`getHoldCount`/`readWriteLock` 等）都会抛 `NullPointerException` 或 `IllegalArgumentException`
+- **跨线程 `unlock` 抛 `IllegalMonitorStateException`**：调用方需保证锁由当前线程释放（持有线程不感知 `forceUnlock` 的情况下）
+- **`unlock` 未知 key 是 no-op**：避免 `AcquiredLock.close()` 在清理后失败
+- **`maxKeys` 限制同时持有的 key 数**：超过后 `tryLock` 返回 `false`，阻塞版 `lock()` 抛 `MaxKeysExceededException`（继承 `IllegalStateException`，保持向后兼容）
 - **per-key 统计默认关闭**：`enablePerKeyMetrics=false` 时所有 per-key 计数操作零开销
-- **事件监听器异常隔离**：监听器抛异常会被捕获并忽略，不影响锁功能
+- **事件监听器异常隔离**：监听器抛 `Throwable`（包括 `Error`）都会被捕获并忽略，不影响锁功能
 - **租约到期事件**：由于 `ReentrantLock` 不支持跨线程强制释放，`onLockExpired` 触发后租约状态已清理，但底层锁可能仍由原持有线程持有 — 需通过 `isLocked` 验证或显式 `unlock`
+- **`getHoldCount` 跨线程读返回持有线程的重入深度**（即 `holderHoldCount`），而非 `ReentrantLock.getHoldCount()` 的 thread-local 视角；持有线程自己读则同 `ReentrantLock.getHoldCount()`
 
 ## 高级用法
 
@@ -379,10 +384,14 @@ try {
 ## 注意事项
 
 1. **`tryLock` 成功后必须 `unlock`**：建议使用 `try-with-resources` 或 `finally` 块
-2. **合理设计 key**：避免动态生成的无界 key（用 `maxKeys` 兜底）
+2. **合理设计 key**：避免动态生成的无界 key（用 `maxKeys` 兜底）。**`null` 或空字符串 key 会被拒绝**，请在调用前做必要校验
 3. **租约时长要 > 业务最长处理时间**：留 2-3 倍余量
 4. **记得 `shutdown()`**：不调用也能让 JVM 退出（守护线程），但显式调用更干净
 5. **本库仅用于单 JVM 内**：跨进程需自行实现分布式锁
+6. **shutdown 后调用 `tryLock`/`lock`/`tryMultiLock` 会抛 `IllegalStateException`**，不要再加新 key；已持有的 key 仍可 `unlock`
+7. **`forceUnlock` 后再 `tryLock`**：同一线程可立即重新获取（哨兵清除），但底层 `ReentrantLock` 实际持有状态由原线程决定 — 应仅在原线程已确认释放或失联时使用
+8. **listener 应快且非阻塞**：listener 抛 `Throwable` 会被吞掉，但耗时调用会拖慢锁的获取/释放路径
+9. **`AcquiredLock.close()` 由实际持有线程调用**：若 `tryAcquireAsync` 成功拿到锁，锁由异步线程持有，必须在异步线程上 `close()`（或在主线程 `forceUnlock()`）
 
 ## License
 
