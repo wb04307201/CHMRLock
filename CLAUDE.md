@@ -12,7 +12,7 @@ CHMRLock is a small Java library that provides a per-key distributed-style lock 
 - Statistics via `MonitorMetrics` (total/success/failed counts, total wait time, success rate, avg wait time)
 - A background cleanup thread that removes `LockEntry` instances that have been idle (not held) for more than 5 minutes
 
-The artifact is published via JitPack (`com.gitee.wb04307201:CHMRLock`), not Maven Central. The Maven `groupId`/`artifactId` are `cn.wubo:CHMRLock` (version `1.0-SNAPSHOT` during development).
+The artifact is published to Maven Central via Sonatype Central (`io.github.wb04307201:CHMRLock`), with GitHub Actions `.github/workflows/publish.yml` triggered on release. The Maven `groupId`/`artifactId` are `io.github.wb04307201:CHMRLock` (version `2.0.0`).
 
 ## Build & Test Commands
 

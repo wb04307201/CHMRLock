@@ -2,7 +2,7 @@
 
 > 基于 `ConcurrentHashMap` + `ReentrantLock` 的细粒度单机锁库。每个 key 独立加锁，支持重入、租约、监控统计。
 
-[![](https://jitpack.io/v/com.gitee.wb04307201/CHMRLock.svg)](https://jitpack.io/#com.gitee.wb04307201/CHMRLock)
+[![](https://jitpack.io/v/io.github.wb04307201/CHMRLock.svg)](https://jitpack.io/#io.github.wb04307201/CHMRLock)
 
 ## 特性
 
@@ -28,22 +28,11 @@
 
 ## 引入
 
-### JitPack 仓库
-
-```xml
-<repositories>
-    <repository>
-        <id>jitpack.io</id>
-        <url>https://jitpack.io</url>
-    </repository>
-</repositories>
-```
-
 ### 依赖
 
 ```xml
 <dependency>
-    <groupId>com.gitee.wb04307201</groupId>
+    <groupId>io.github.wb04307201</groupId>
     <artifactId>CHMRLock</artifactId>
     <version>2.0.0</version>
 </dependency>
