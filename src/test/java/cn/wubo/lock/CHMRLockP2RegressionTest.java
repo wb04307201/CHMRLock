@@ -29,7 +29,7 @@ class CHMRLockP2RegressionTest {
 
         @Override public void onLockAcquired(String key, long waitNanos) { events.add("acquired:" + key); }
         @Override public void onLockReleased(String key, long heldMillis) { events.add("released:" + key); }
-        @Override public void onLockFailed(String key, long waitNanos, String reason) { events.add("failed:" + key + ":" + reason); }
+        @Override public void onLockFailed(String key, long waitNanos, LockFailureReason reason) { events.add("failed:" + key + ":" + reason.code()); }
         @Override public void onLockExpired(String key) { events.add("expired:" + key); }
         @Override public void onLockContended(String key) { events.add("contended:" + key); }
     }
