@@ -32,14 +32,13 @@ public interface LockListener {
     default void onLockReleased(String key, long heldMillis) {}
 
     /**
-     * 获取锁失败时触发。{@code reason} 取值:
-     * <ul>
-     *   <li>{@code "timeout"} - 等待超时</li>
-     *   <li>{@code "maxKeys"} - 超过 maxKeys 限制</li>
-     *   <li>{@code "interrupted"} - 等待中被中断</li>
-     * </ul>
+     * 获取锁失败时触发。{@code reason} 为强类型枚举,支持 {@code switch} 穷举。
+     *
+     * @param reason 失败原因:{@link LockFailureReason#TIMEOUT TIMEOUT} /
+     *               {@link LockFailureReason#MAX_KEYS MAX_KEYS} /
+     *               {@link LockFailureReason#INTERRUPTED INTERRUPTED}
      */
-    default void onLockFailed(String key, long waitNanos, String reason) {}
+    default void onLockFailed(String key, long waitNanos, LockFailureReason reason) {}
 
     /**
      * 租约到期后触发。注意:由于 {@link java.util.concurrent.locks.ReentrantLock}

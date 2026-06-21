@@ -249,7 +249,7 @@ public class CHMRLockRound2Test {
             @Override public void onLockReleased(String k, long held) {
                 throw new RuntimeException("boom-rel");
             }
-            @Override public void onLockFailed(String k, long w, String reason) {
+            @Override public void onLockFailed(String k, long w, LockFailureReason reason) {
                 throw new RuntimeException("boom-fail");
             }
         };

@@ -34,7 +34,7 @@
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>CHMRLock</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 

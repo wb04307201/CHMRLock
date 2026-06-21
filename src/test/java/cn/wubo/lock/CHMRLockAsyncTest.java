@@ -84,8 +84,8 @@ class CHMRLockAsyncTest {
             // or the comparison-set missed. Re-read to handle the race benignly.
             String name = acquiredThreadName.get();
             assertNotNull(name, "onLockAcquired should have fired for k1");
-            assertTrue(name.startsWith("chmrlock-async-"),
-                    "async acquisition should run on the dedicated chmrlock-async-N thread, was: " + name);
+            assertTrue(name.startsWith("chmrlock-default-async-"),
+                    "async acquisition should run on the dedicated chmrlock-<name>-async-N thread, was: " + name);
         }
     }
 

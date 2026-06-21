@@ -3,6 +3,7 @@ package cn.wubo.lock;
 import java.time.Clock;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -29,10 +30,10 @@ class LockEntry {
     private final AtomicLong lastAcquireTime = new AtomicLong(0);
     private final AtomicLong ownerThreadId = new AtomicLong(-1);
     private final AtomicLong leaseEndTime = new AtomicLong(Long.MAX_VALUE);
-    private final AtomicLong acquireCount = new AtomicLong(0);
-    private final AtomicLong successCount = new AtomicLong(0);
-    private final AtomicLong failedCount = new AtomicLong(0);
-    private final AtomicLong totalWaitNanos = new AtomicLong(0);
+    private final LongAdder acquireCount = new LongAdder();
+    private final LongAdder successCount = new LongAdder();
+    private final LongAdder failedCount = new LongAdder();
+    private final LongAdder totalWaitNanos = new LongAdder();
     // 持有线程的重入计数,独立于 ReentrantLock 的 thread-local 计数,
     // 用于 KeyStatistics 跨线程快照(snapshotFor) —
     // ReentrantLock.getHoldCount() 只对当前线程有意义,跨线程读为 0,
@@ -138,20 +139,20 @@ class LockEntry {
         stateFlags.updateAndGet(f -> f | FLAG_RELEASE_EVENT_FIRED);
     }
 
-    long getAcquireCount() { return acquireCount.get(); }
-    long getSuccessCount() { return successCount.get(); }
-    long getFailedCount() { return failedCount.get(); }
-    long getTotalWaitNanos() { return totalWaitNanos.get(); }
+    long getAcquireCount() { return acquireCount.sum(); }
+    long getSuccessCount() { return successCount.sum(); }
+    long getFailedCount() { return failedCount.sum(); }
+    long getTotalWaitNanos() { return totalWaitNanos.sum(); }
     long getLastReleaseTime() { return lastReleaseTime.get(); }
 
-    void recordAcquireAttempt() { acquireCount.incrementAndGet(); }
+    void recordAcquireAttempt() { acquireCount.increment(); }
     void recordAcquireSuccess(long waitNanos) {
-        successCount.incrementAndGet();
-        totalWaitNanos.addAndGet(waitNanos);
+        successCount.increment();
+        totalWaitNanos.add(waitNanos);
     }
     void recordAcquireFailure(long waitNanos) {
-        failedCount.incrementAndGet();
-        totalWaitNanos.addAndGet(waitNanos);
+        failedCount.increment();
+        totalWaitNanos.add(waitNanos);
     }
     void recordRelease(long epochMillis) { lastReleaseTime.set(epochMillis); }
 

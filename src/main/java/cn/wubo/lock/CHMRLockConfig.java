@@ -3,6 +3,7 @@ package cn.wubo.lock;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
 
 /**
  * CHMRLock 的不可变配置记录。通过 {@link Builder} 构造,使用 {@link #defaults()} 获取默认配置。
@@ -16,6 +17,7 @@ import java.util.Objects;
  * @see CHMRLock#CHMRLock(CHMRLockConfig)
  */
 public record CHMRLockConfig(
+        String name,
         Duration defaultWaitTime,
         Duration defaultLeaseTime,
         Duration idleThreshold,
@@ -28,9 +30,13 @@ public record CHMRLockConfig(
         boolean forceUnlockEnabled,
         Clock clock,
         int asyncMaxThreads,
-        int asyncQueueCapacity
+        int asyncQueueCapacity,
+        boolean recordStats,
+        ExecutorService asyncExecutor,
+        LeasePolicy leasePolicy
 ) {
     public CHMRLockConfig {
+        Objects.requireNonNull(name, "name");
         Objects.requireNonNull(defaultWaitTime, "defaultWaitTime");
         Objects.requireNonNull(defaultLeaseTime, "defaultLeaseTime");
         Objects.requireNonNull(idleThreshold, "idleThreshold");
@@ -49,10 +55,11 @@ public record CHMRLockConfig(
     public static CHMRLockConfig defaults() {
         int defaultMaxThreads = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
         return new CHMRLockConfig(
+                "default",
                 Duration.ofSeconds(3), Duration.ZERO,
                 Duration.ofMinutes(5), Duration.ofSeconds(1),
                 0L, true, true, false, false, false, Clock.systemUTC(),
-                defaultMaxThreads, 1024);
+                defaultMaxThreads, 1024, false, null, null);
     }
 
     /** @return 新的 {@link Builder} 实例,所有字段预填为默认值。 */
@@ -62,6 +69,7 @@ public record CHMRLockConfig(
      * {@link CHMRLockConfig} 的流式构建器。每个 setter 立即返回 {@code this},便于链式调用。
      */
     public static final class Builder {
+        private String name = "default";
         private Duration defaultWaitTime = Duration.ofSeconds(3);
         private Duration defaultLeaseTime = Duration.ZERO;
         private Duration idleThreshold = Duration.ofMinutes(5);
@@ -75,7 +83,18 @@ public record CHMRLockConfig(
         private Clock clock = Clock.systemUTC();
         private int asyncMaxThreads = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
         private int asyncQueueCapacity = 1024;
+        private boolean recordStats = false;
+        private ExecutorService asyncExecutor = null;
+        private LeasePolicy leasePolicy = null;
 
+        /**
+         * @param n 实例名称,用于日志和监控区分多个 CHMRLock 实例;不能为 null
+         * @throws NullPointerException 若 {@code n} 为 null
+         */
+        public Builder name(String n) {
+            Objects.requireNonNull(n, "name must not be null");
+            this.name = n; return this;
+        }
         /**
          * @param d {@code tryLock(key)} 的默认等待时长,不能为 null,不能为负
          * @throws NullPointerException 若 {@code d} 为 null
@@ -169,6 +188,32 @@ public record CHMRLockConfig(
             this.asyncQueueCapacity = n; return this;
         }
         /**
+         * @param b 是否启用详细统计（延迟分布直方图、热点 key 采样等开销较高的指标）。
+         *          默认 {@code false}。启用后 {@link CHMRLock#latencyHistogram()} 返回真实数据,
+         *          否则返回 {@code null}。
+         */
+        public Builder recordStats(boolean b) { this.recordStats = b; return this; }
+        /**
+         * 注入自定义异步获取锁执行器。默认 {@code null} 表示使用 CHMRLock 内部创建的线程池
+         * （线程数 = {@link #asyncMaxThreads(int)}、队列 = {@link #asyncQueueCapacity(int)}）。
+         *
+         * <p>注入后可复用已有线程池（带监控、限流、虚拟线程等），但此时 asyncMaxThreads /
+         * asyncQueueCapacity 配置将被忽略。传入的 executor 生命周期由调用方管理，
+         * CHMRLock {@link CHMRLock#shutdown()} 不会关闭注入的 executor。</p>
+         */
+        public Builder asyncExecutor(ExecutorService executor) {
+            this.asyncExecutor = executor; return this;
+        }
+        /**
+         * 配置按 key 动态决定租约时长的策略。默认 {@code null} 表示所有 key 统一使用
+         * {@link #defaultLeaseTime(Duration)}。设置后,tryLock 时会先调用
+         * {@link LeasePolicy#leaseFor(String)} 获取该 key 的租约时长,若策略返回 null 或
+         * Duration.ZERO 则该 key 不启用租约。
+         */
+        public Builder leasePolicy(LeasePolicy policy) {
+            this.leasePolicy = policy; return this;
+        }
+        /**
          * 构造不可变配置。任意字段非法(null / 负值)都会抛 {@link IllegalArgumentException}。
          *
          * <p>R6 修复(L-1/L-2):Builder setter 现在也立即校验字段合法性,提供更早的反馈;
@@ -178,11 +223,12 @@ public record CHMRLockConfig(
          * @return 校验后的 {@link CHMRLockConfig}
          */
         public CHMRLockConfig build() {
-            return new CHMRLockConfig(defaultWaitTime, defaultLeaseTime,
+            return new CHMRLockConfig(name, defaultWaitTime, defaultLeaseTime,
                     idleThreshold, cleanupInterval, maxKeys,
                     daemonCleanupThread, forceUnlockOnLeaseExpiry,
                     fairLock, enablePerKeyMetrics, forceUnlockEnabled, clock,
-                    asyncMaxThreads, asyncQueueCapacity);
+                    asyncMaxThreads, asyncQueueCapacity, recordStats, asyncExecutor,
+                    leasePolicy);
         }
     }
 }

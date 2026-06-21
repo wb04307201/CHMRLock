@@ -6,6 +6,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
@@ -56,20 +57,26 @@ public class CHMRLock implements AutoCloseable {
     // Per-key StampedLock cache for read-write scenarios
     private final ConcurrentHashMap<String, StampedKeyedReadWriteLock> rwLockMap = new ConcurrentHashMap<>();
 
-    // 统计信息
-    private final AtomicLong totalLocks = new AtomicLong(0);
-    private final AtomicLong successLocks = new AtomicLong(0);
-    private final AtomicLong failedLocks = new AtomicLong(0);
-    private final AtomicLong totalWaitTime = new AtomicLong(0);
+    // 统计信息（LongAdder：高竞争场景下 CAS 失败率显著低于 AtomicLong）
+    private final LongAdder totalLocks = new LongAdder();
+    private final LongAdder successLocks = new LongAdder();
+    private final LongAdder failedLocks = new LongAdder();
+    private final LongAdder totalWaitTime = new LongAdder();
+
+    // recordStats 才启用：延迟分布直方图
+    private final LatencyHistogram waitLatency;
+    // recordStats 才启用：热点 key 采样器
+    private final HotKeySampler hotKeySampler;
 
     // 清理线程池：用于定期执行清理任务
     private final ScheduledExecutorService cleanupExecutor;
 
     // 异步获取锁的线程池：用于 CompletableFuture.supplyAsync 的执行器（守护线程）。
-    // 注:这是无界 cached 线程池 — 若大量并发 tryAcquireAsync 调用命中同一把争用锁,
-    // 线程数会快速增长(每个调用都会占一个线程直到 tryLock 返回)。生产环境若有此
-    // 风险,建议在外层做并发限流或自行注入有界 ExecutorService(暂未提供配置入口)。
+    // 可通过 {@link CHMRLockConfig.Builder#asyncExecutor(ExecutorService)} 注入自定义线程池,
+    // 此时线程数与队列配置被忽略,且 CHMRLock {@link #shutdown()} 不会关闭注入的 executor。
     private final ExecutorService asyncExecutor;
+    // 是否由 CHMRLock 自己创建 asyncExecutor（决定 shutdown 时是否关闭）
+    private final boolean ownsAsyncExecutor;
 
     // 锁生命周期监听器列表
     private final List<LockListener> listeners = new CopyOnWriteArrayList<>();
@@ -105,33 +112,41 @@ public class CHMRLock implements AutoCloseable {
         this.config = config;
         this.defaultWaitTime = config.defaultWaitTime().toMillis();
         this.defaultLeaseTime = config.defaultLeaseTime().toMillis();
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config, "chmrlock-cleanup"));
-        // 异步获取锁的线程池:有界线程池 + 有界任务队列,两段式 RejectedExecutionHandler 提供背压。
+        this.waitLatency = config.recordStats() ? new LatencyHistogram() : null;
+        this.hotKeySampler = config.recordStats() ? new HotKeySampler() : null;
+        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory(config, "chmrlock-" + config.name() + "-cleanup"));
+        // 异步获取锁的线程池:优先使用用户注入的 executor；否则创建有界线程池 + 有界任务队列,
+        // 两段式 RejectedExecutionHandler 提供背压。
         // 默认线程数 = availableProcessors * 4,默认队列 = 1024。
-        //
-        // R6 修复(R-2):之前的 handler `(r, executor) -> r.run()` 在所有拒绝场景下都同步执行,
-        // 包括 executor 已 shutdown 的情况 —— 这会导致业务方在 shutdown 后调用 tryAcquireAsync
-        // 时被调用线程同步占用(可能 3 秒以上,取决于 defaultWaitTime),与"异步不阻塞"的承诺矛盾。
-        //
-        // 当前策略:
-        // - 队列满(线程池未 shutdown):由调用线程同步执行 (CallerRunsPolicy 语义),提供背压
-        // - executor 已 shutdown:抛 RejectedExecutionException,业务方可显式感知并降级处理
-        java.util.concurrent.ThreadPoolExecutor asyncPool = new java.util.concurrent.ThreadPoolExecutor(
-                0, config.asyncMaxThreads(),
-                60L, TimeUnit.SECONDS,
-                new java.util.concurrent.LinkedBlockingQueue<>(config.asyncQueueCapacity()),
-                daemonThreadFactory(config, "chmrlock-async"),
-                (r, executor) -> {
-                    // shutdown 后:不再同步执行,直接 REE 让业务感知
-                    if (executor.isShutdown()) {
-                        throw new java.util.concurrent.RejectedExecutionException(
-                                "CHMRLock asyncExecutor is shutdown");
-                    }
-                    // 队列满(线程池仍运行):由调用线程同步执行,提供背压
-                    r.run();
-                });
-        asyncPool.allowCoreThreadTimeOut(true);
-        this.asyncExecutor = asyncPool;
+        if (config.asyncExecutor() != null) {
+            this.asyncExecutor = config.asyncExecutor();
+            this.ownsAsyncExecutor = false;
+        } else {
+            // R6 修复(R-2):之前的 handler `(r, executor) -> r.run()` 在所有拒绝场景下都同步执行,
+            // 包括 executor 已 shutdown 的情况 —— 这会导致业务方在 shutdown 后调用 tryAcquireAsync
+            // 时被调用线程同步占用(可能 3 秒以上,取决于 defaultWaitTime),与"异步不阻塞"的承诺矛盾。
+            //
+            // 当前策略:
+            // - 队列满(线程池未 shutdown):由调用线程同步执行 (CallerRunsPolicy 语义),提供背压
+            // - executor 已 shutdown:抛 RejectedExecutionException,业务方可显式感知并降级处理
+            java.util.concurrent.ThreadPoolExecutor asyncPool = new java.util.concurrent.ThreadPoolExecutor(
+                    0, config.asyncMaxThreads(),
+                    60L, TimeUnit.SECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<>(config.asyncQueueCapacity()),
+                    daemonThreadFactory(config, "chmrlock-" + config.name() + "-async"),
+                    (r, executor) -> {
+                        // shutdown 后:不再同步执行,直接 REE 让业务感知
+                        if (executor.isShutdown()) {
+                            throw new java.util.concurrent.RejectedExecutionException(
+                                    "CHMRLock asyncExecutor is shutdown");
+                        }
+                        // 队列满(线程池仍运行):由调用线程同步执行,提供背压
+                        r.run();
+                    });
+            asyncPool.allowCoreThreadTimeOut(true);
+            this.asyncExecutor = asyncPool;
+            this.ownsAsyncExecutor = true;
+        }
 
         // 启动后台清理线程
         startCleanupThread();
@@ -198,7 +213,7 @@ public class CHMRLock implements AutoCloseable {
             });
         } catch (Exception e) {
             // 业务类异常不能让清理线程死掉
-            log.warning("cleanupTick failed: " + e);
+            log.warning("[" + config.name() + "] cleanupTick failed: " + e);
         }
     }
 
@@ -225,7 +240,7 @@ public class CHMRLock implements AutoCloseable {
      */
     public boolean tryLock(String key) {
         validateKey(key);
-        return tryLock(key, defaultWaitTime, defaultLeaseTime, TimeUnit.MILLISECONDS);
+        return tryLock(key, defaultWaitTime, resolveLeaseTimeMillis(key), TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -241,7 +256,7 @@ public class CHMRLock implements AutoCloseable {
         validateKey(key);
         Objects.requireNonNull(timeUnit, "timeUnit must not be null");
         if (waitTime < 0) throw new IllegalArgumentException("waitTime 必须 >= 0,实际:" + waitTime);
-        return tryLock(key, waitTime, defaultLeaseTime, timeUnit);
+        return tryLock(key, waitTime, resolveLeaseTimeMillis(key), timeUnit);
     }
 
     /**
@@ -275,7 +290,8 @@ public class CHMRLock implements AutoCloseable {
         // 避免 wall clock (config.clock().millis()) 在时钟回退时产生负 elapsed,
         // 进而污染 totalWaitTime 统计。
         long startNanos = System.nanoTime();
-        totalLocks.incrementAndGet();
+        totalLocks.increment();
+        if (hotKeySampler != null) hotKeySampler.record(key);
         boolean perKeyMetrics = config.enablePerKeyMetrics();
 
         // 记录 key 是否已存在于 map 中(用于 maxKeys 限制的"新 key"判断)
@@ -288,9 +304,9 @@ public class CHMRLock implements AutoCloseable {
         // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入;
         // 同时要求该 key 当前未被持有(否则是同线程 reentry,不应被拒绝)。
         if (config.maxKeys() > 0 && wasNew && countHeldEntries() >= config.maxKeys()) {
-            failedLocks.incrementAndGet();
+            failedLocks.increment();
             long elapsedNanos = System.nanoTime() - startNanos;
-            totalWaitTime.addAndGet(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            totalWaitTime.add(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
             // R6 修复(B-2):在 lockMap.remove 之前先把失败计数持久化到 LockEntry,
             // 否则 getStatistics(key) 会因为 entry 已被移除而看不到这次失败尝试。
             if (perKeyMetrics) {
@@ -299,7 +315,7 @@ public class CHMRLock implements AutoCloseable {
             }
             // 被拒绝的 key 不应在 lockMap 中残留(以免 getActiveKeys 把已拒绝的 key 算进去)
             lockMap.remove(key, lockEntry);
-            fireFailed(key, elapsedNanos, "maxKeys");
+            fireFailed(key, elapsedNanos, LockFailureReason.MAX_KEYS);
             return false;
         }
 
@@ -318,7 +334,7 @@ public class CHMRLock implements AutoCloseable {
         try {
             boolean acquired = lockEntry.lock.tryLock(waitTime, timeUnit);
             if (acquired) {
-                successLocks.incrementAndGet();
+                successLocks.increment();
                 lockEntry.touchLastAcquireTime(config.clock());
                 lockEntry.setOwnerThreadId(Thread.currentThread().getId());
                 // 重新获取时复位 forceUnlock 哨兵,使后续 isLocked 反映真实状态
@@ -341,24 +357,25 @@ public class CHMRLock implements AutoCloseable {
                 fireAcquired(key, System.nanoTime() - startNanos);
                 return true;
             } else {
-                failedLocks.incrementAndGet();
+                failedLocks.increment();
                 if (perKeyMetrics) {
                     lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
                 }
-                fireFailed(key, System.nanoTime() - startNanos, "timeout");
+                fireFailed(key, System.nanoTime() - startNanos, LockFailureReason.TIMEOUT);
                 return false;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            failedLocks.incrementAndGet();
+            failedLocks.increment();
             if (perKeyMetrics) {
                 lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
             }
-            fireFailed(key, System.nanoTime() - startNanos, "interrupted");
+            fireFailed(key, System.nanoTime() - startNanos, LockFailureReason.INTERRUPTED);
             return false;
         } finally {
             long elapsedNanos = System.nanoTime() - startNanos;
-            totalWaitTime.addAndGet(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            totalWaitTime.add(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            if (waitLatency != null) waitLatency.record(elapsedNanos);
         }
     }
 
@@ -372,6 +389,23 @@ public class CHMRLock implements AutoCloseable {
     private void validateKey(String key) {
         Objects.requireNonNull(key, "key must not be null");
         if (key.isEmpty()) throw new IllegalArgumentException("key must not be empty");
+    }
+
+    /**
+     * 解析指定 key 的租约毫秒数。若配置了 {@link LeasePolicy} 且策略返回非 null 非零值,
+     * 使用策略结果;否则使用 {@link #defaultLeaseTime}。
+     */
+    private long resolveLeaseTimeMillis(String key) {
+        LeasePolicy policy = config.leasePolicy();
+        if (policy != null) {
+            try {
+                Duration d = policy.leaseFor(key);
+                if (d != null) return d.toMillis();
+            } catch (Exception e) {
+                log.warning("LeasePolicy threw for key=" + key + ": " + e.getMessage());
+            }
+        }
+        return defaultLeaseTime;
     }
 
     private void scheduleLeaseExpiry(String key, long leaseEndMillis) {
@@ -423,7 +457,7 @@ public class CHMRLock implements AutoCloseable {
     public boolean tryLock(String key, long waitTime){
         validateKey(key);
         if (waitTime < 0) throw new IllegalArgumentException("waitTime 必须 >= 0,实际:" + waitTime);
-        return tryLock(key, waitTime, defaultLeaseTime, TimeUnit.MILLISECONDS);
+        return tryLock(key, waitTime, resolveLeaseTimeMillis(key), TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -472,7 +506,8 @@ public class CHMRLock implements AutoCloseable {
         }
         // R6 修复(E-1):用 System.nanoTime() 单调时钟计算 elapsed
         long startNanos = System.nanoTime();
-        totalLocks.incrementAndGet();
+        totalLocks.increment();
+        if (hotKeySampler != null) hotKeySampler.record(key);
         boolean perKeyMetrics = config.enablePerKeyMetrics();
 
         // 记录 key 是否已存在于 map 中(用于 maxKeys 限制的"新 key"判断)
@@ -484,9 +519,9 @@ public class CHMRLock implements AutoCloseable {
         // maxKeys 限制:仅对"新 key"生效,已存在的 key 可重入;
         // 同时要求该 key 当前未被持有(否则是同线程 reentry,不应被拒绝)。
         if (config.maxKeys() > 0 && wasNew && countHeldEntries() >= config.maxKeys()) {
-            failedLocks.incrementAndGet();
+            failedLocks.increment();
             long elapsedNanos = System.nanoTime() - startNanos;
-            totalWaitTime.addAndGet(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            totalWaitTime.add(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
             // R6 修复(B-2):在 lockMap.remove 之前先把失败计数持久化
             if (perKeyMetrics) {
                 lockEntry.recordAcquireAttempt();
@@ -494,7 +529,7 @@ public class CHMRLock implements AutoCloseable {
             }
             // 被拒绝的 key 不应在 lockMap 中残留
             lockMap.remove(key, lockEntry);
-            fireFailed(key, elapsedNanos, "maxKeys");
+            fireFailed(key, elapsedNanos, LockFailureReason.MAX_KEYS);
             throw new MaxKeysExceededException("maxKeys limit reached: " + config.maxKeys());
         }
 
@@ -509,7 +544,7 @@ public class CHMRLock implements AutoCloseable {
 
         try {
             lockEntry.lock.lockInterruptibly();
-            successLocks.incrementAndGet();
+            successLocks.increment();
             lockEntry.touchLastAcquireTime(config.clock());
             lockEntry.setOwnerThreadId(Thread.currentThread().getId());
             // 重新获取时复位 forceUnlock 哨兵
@@ -530,16 +565,17 @@ public class CHMRLock implements AutoCloseable {
             }
             fireAcquired(key, System.nanoTime() - startNanos);
         } catch (InterruptedException e) {
-            failedLocks.incrementAndGet();
+            failedLocks.increment();
             if (perKeyMetrics) {
                 lockEntry.recordAcquireFailure(System.nanoTime() - startNanos);
             }
-            fireFailed(key, System.nanoTime() - startNanos, "interrupted");
+            fireFailed(key, System.nanoTime() - startNanos, LockFailureReason.INTERRUPTED);
             Thread.currentThread().interrupt();
             throw e;
         } finally {
             long elapsedNanos = System.nanoTime() - startNanos;
-            totalWaitTime.addAndGet(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            totalWaitTime.add(TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+            if (waitLatency != null) waitLatency.record(elapsedNanos);
         }
     }
 
@@ -619,9 +655,9 @@ public class CHMRLock implements AutoCloseable {
         // 非可重入 fast-fail:R6 修复(B-1)—— fast-fail 现在计入全局 failedLocks,
         // 之前注释说计入但实际未计入(per-key 也未记,因为还没进 tryLock),导致
         // 总锁计数与成功+失败计数之和不等于 totalLocks。现在统一在 fast-fail
-        // 路径也调用 failedLocks.incrementAndGet(),保持 totalLocks == success + failed 不变。
+        // 路径也调用 failedLocks.increment(),保持 totalLocks == success + failed 不变。
         if (isHeldByCurrentThread(key)) {
-            failedLocks.incrementAndGet();
+            failedLocks.increment();
             return Optional.empty();
         }
         if (tryLock(key, waitTime, leaseTime, timeUnit)) {
@@ -1138,7 +1174,7 @@ public class CHMRLock implements AutoCloseable {
         }
     }
 
-    private void fireFailed(String key, long waitNanos, String reason) {
+    private void fireFailed(String key, long waitNanos, LockFailureReason reason) {
         for (LockListener l : listeners) {
             try { l.onLockFailed(key, waitNanos, reason); } catch (Throwable t) {
                 log.warning("LockListener.onLockFailed threw: " + t);
@@ -1177,7 +1213,7 @@ public class CHMRLock implements AutoCloseable {
             if (cleanupExecutor != null) {
                 cleanupExecutor.shutdown();
             }
-            if (asyncExecutor != null) {
+            if (asyncExecutor != null && ownsAsyncExecutor) {
                 asyncExecutor.shutdown();
             }
         }
@@ -1186,6 +1222,11 @@ public class CHMRLock implements AutoCloseable {
     /** @return 是否已调用过 {@link #shutdown()} */
     public boolean isShutdown() {
         return shutdownCalled.get();
+    }
+
+    /** @return 实例名称，来自 {@link CHMRLockConfig#name()}；默认 {@code "default"} */
+    public String getName() {
+        return config.name();
     }
 
     /** {@link AutoCloseable#close()} 实现，等价于 {@link #shutdown()}。支持 try-with-resources。 */
@@ -1197,11 +1238,37 @@ public class CHMRLock implements AutoCloseable {
     /** @return 全局统计指标快照 */
     public MonitorMetrics getStatistics() {
         return new MonitorMetrics(
-                totalLocks.get(),
-                successLocks.get(),
-                failedLocks.get(),
-                totalWaitTime.get()
+                totalLocks.sum(),
+                successLocks.sum(),
+                failedLocks.sum(),
+                totalWaitTime.sum()
         );
+    }
+
+    /**
+     * 返回 tryLock 等待时长的延迟分布直方图。需 {@link CHMRLockConfig#recordStats()} 为 true。
+     *
+     * <p>7 桶对数分桶（1µs / 10µs / 100µs / 1ms / 10ms / 100ms / &gt;100ms），
+     * 便于定位"P99 慢锁"问题 —— 平均值无法反映的分布异常，直方图可以。
+     *
+     * @return 直方图实例；未启用时返回 {@code null}
+     * @since 2.1.0
+     */
+    public LatencyHistogram latencyHistogram() {
+        return waitLatency;
+    }
+
+    /**
+     * 返回热点 key 采样器。需 {@link CHMRLockConfig#recordStats()} 为 true。
+     *
+     * <p>基于 Count-Min Sketch（4 哈希 × 1024 桶 ≈ 8KB），每 1 万次访问采样 1 次，
+     * 在未开启 per-key metrics 时也能识别争用热点锁。</p>
+     *
+     * @return 采样器实例；未启用时返回 {@code null}
+     * @since 2.1.0
+     */
+    public HotKeySampler hotKeySampler() {
+        return hotKeySampler;
     }
 
     /**
